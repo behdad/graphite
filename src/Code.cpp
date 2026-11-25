@@ -42,9 +42,9 @@ inline bool is_return(const instr i) {
     return i == pop_ret || i == ret_zero || i == ret_true;
 }
 
+// No constructors, so that an array of these can be cleared in one go.
 struct context
 {
-    context(uint8 ref=0) : codeRef(ref) {flags.changed=false; flags.referenced=false;}
     struct {
         uint8   changed:1,
                 referenced:1;
@@ -116,6 +116,7 @@ inline Machine::Code::decoder::decoder(limits & lims, Code &code, enum passtype 
   _stack_depth(0),
   _in_ctxt_item(false),
   _slotref(0),
+  _contexts(),
   _max_ref(0)
 { }
 
@@ -495,7 +496,9 @@ void Machine::Code::decoder::analyse_opcode(const opcode opc, const int8  * arg)
     case NEXT :
     case COPY_NEXT :
       ++_slotref;
-      _contexts[_slotref] = context(uint8(_code._instr_count+1));
+      _contexts[_slotref].flags.changed = false;
+      _contexts[_slotref].flags.referenced = false;
+      _contexts[_slotref].codeRef = uint8(_code._instr_count+1);
       // if (_analysis.slotref > _analysis.max_ref) _analysis.max_ref = _analysis.slotref;
       break;
     case INSERT :
