@@ -72,7 +72,7 @@ private:
     State             * m_states;
     vm::Machine::Code * m_codes;
     byte              * m_progs;
-    byte              * m_filter;       // per glyph: 0 if no rule can match with it at the cursor
+    byte              * m_filter;       // per glyph: whether a rule can match with it at the cursor
     uint32            * m_filterPairs;  // per column: the columns that can come next in a match
 
     byte   m_numCollRuns;

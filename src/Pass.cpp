@@ -456,6 +456,10 @@ private:
 enum { CAN_GO_ON = 1,   // lead to a state that has transitions
        CAN_MATCH = 2 }; // lead to a state that has rules
 
+// What m_filter says of a glyph at the cursor.
+enum { FILTER_CAN = 1,      // a rule can match
+       FILTER_ALONE = 2 };  // and whatever glyph follows
+
 // Notes what each column can do at the cursor, and each transition state a
 // column leads to there.
 class Columns
@@ -677,7 +681,7 @@ bool Pass::buildFilter(const byte * ranges, size_t num_ranges, Face & face, Erro
                          end   = be::read<uint16>(ranges) + 1,
                          col   = be::read<uint16>(ranges);
             if (!can[col]) continue;
-            memset(filter + first, 1, end - first);
+            memset(filter + first, FILTER_CAN | (can[col] & CAN_MATCH ? FILTER_ALONE : 0), end - first);
             n += end - first;
         }
         worthwhile = n != m_numGlyphs;
@@ -714,7 +718,9 @@ bool Pass::couldMatch(const Slot * slot) const
     if (!filter) return true;
 
     const unsigned int gid = slot->gid();
-    if (gid >= m_numGlyphs || !filter[gid]) return false;
+    if (gid >= m_numGlyphs) return false;
+    const unsigned int can = filter[gid];
+    if (can != FILTER_CAN) return can != 0;
 
     const uint32 * pairs = m_filterPairs;
     if (!pairs) return true;
