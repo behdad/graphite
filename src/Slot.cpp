@@ -450,7 +450,9 @@ void Slot::setGlyph(Segment *seg, uint16 glyphid, const GlyphFace * theGlyph)
         if (!aGlyph) aGlyph = theGlyph;
     }
     m_advance = Position(aGlyph->theAdvance().x, 0.);
-    if (seg->silf()->aPassBits())
+    // The pass bits are only ever and-ed into, so once they are all clear
+    // there is nothing left for a glyph to clear.
+    if (seg->passBits() && seg->silf()->aPassBits())
     {
         seg->mergePassBits(uint8(theGlyph->attrs()[seg->silf()->aPassBits()]));
         if (seg->silf()->numPasses() > 16)
