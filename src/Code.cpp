@@ -83,6 +83,7 @@ private:
     DECODER_INLINE void     set_ref(int index) throw();
     DECODER_INLINE void     set_noref(int index) throw();
     DECODER_INLINE void     set_changed(int index) throw();
+    DECODER_INLINE bool     decode(const byte * bc, const byte * bc_end);
     DECODER_INLINE opcode   fetch_opcode(const byte * bc);
     DECODER_INLINE void     analyse_opcode(const opcode, const int8 * const dp) throw();
     DECODER_INLINE void     emit_opcode(opcode opc, const byte * & bc);
@@ -91,9 +92,18 @@ private:
     DECODER_INLINE bool     test_context() const throw();
     DECODER_INLINE bool     test_ref(int8 index) const throw();
     DECODER_INLINE bool     test_attr(attrCode attr) const throw();
-    void        failure(const status_t s) const throw() { _code.failure(s); }
+    void        failure(const status_t s) const throw() { _code.failure(s); _failed = true; }
 
     Code              & _code;
+    // Working copies of what the code object holds, so that they need not
+    // be fetched from it and put back for every opcode. load() brings the
+    // code object's counts up to date when it is done.
+    const bool          _constraint;
+    size_t              _instr_count,
+                        _data_size;
+    mutable bool        _failed;        // whether failure() has been called
+    instr               _impl;          // of the opcode being decoded
+    size_t              _param_sz;
     int                 _out_index;
     uint16              _out_length;
     instr             * _instr;
@@ -123,6 +133,10 @@ struct Machine::Code::decoder::limits
 Machine::Code::decoder::decoder(limits & lims, Code &code, enum passtype pt, const opcode_t * op_to_fn,
                                 context * contexts) throw()
 : _code(code),
+  _constraint(code._constraint),
+  _instr_count(code._instr_count), _data_size(code._data_size),
+  _failed(!code),
+  _impl(0), _param_sz(0),
   _out_index(code._constraint ? 0 : lims.pre_context),
   _out_length(code._constraint ? 1 : lims.rule_length),
   _instr(code._code), _data(code._data), _max(lims), _op_to_fn(op_to_fn), _passtype(pt),
@@ -249,6 +263,14 @@ Machine::Code::~Code() throw ()
 
 bool Machine::Code::decoder::load(const byte * bc, const byte * bc_end)
 {
+    const bool loaded = decode(bc, bc_end);
+    _code._instr_count = _instr_count;
+    _code._data_size   = _data_size;
+    return loaded;
+}
+
+bool Machine::Code::decoder::decode(const byte * bc, const byte * bc_end)
+{
     // What is needed to finish off the context item being decoded, if any.
     // Context items cannot nest, fetch_opcode sees to that.
     const byte * outer_end  = 0;    // where the code around the item ends
@@ -280,10 +302,10 @@ bool Machine::Code::decoder::load(const byte * bc, const byte * bc_end)
                 _slotref = int8(_data[-2]);
                 _out_length = _max.rule_length;
 
-                ctxt_start = _code._instr_count;
+                ctxt_start = _instr_count;
                 instr_skip = _data - 1;
                 data_skip  = _data++;
-                ++_code._data_size;
+                ++_data_size;
                 outer_end = bc_end;
                 bc_end = bc + *instr_skip;
                 _max.bytecode = bc_end;
@@ -294,8 +316,8 @@ bool Machine::Code::decoder::load(const byte * bc, const byte * bc_end)
             break;
 
         // That was the end of a context item, carry on with what follows it.
-        *data_skip  = *instr_skip - byte(_code._instr_count - ctxt_start);
-        *instr_skip =  byte(_code._instr_count - ctxt_start);
+        *data_skip  = *instr_skip - byte(_instr_count - ctxt_start);
+        *instr_skip =  byte(_instr_count - ctxt_start);
         bc_end = outer_end;
         _max.bytecode = bc_end;
 
@@ -305,7 +327,7 @@ bool Machine::Code::decoder::load(const byte * bc, const byte * bc_end)
         _in_ctxt_item = false;
     }
 
-    return bool(_code);
+    return !_failed;
 }
 
 // Validation check and fixups.
@@ -523,7 +545,7 @@ opcode Machine::Code::decoder::fetch_opcode(const byte * bc)
             break;
     }
 
-    return bool(_code) ? opcode(opc) : MAX_OPCODE;
+    return _failed ? MAX_OPCODE : opcode(opc);
 }
 
 
@@ -559,7 +581,7 @@ void Machine::Code::decoder::analyse_opcode(const opcode opc, const int8  * arg)
       ++_slotref;
       _contexts[_slotref].flags.changed = false;
       _contexts[_slotref].flags.referenced = false;
-      _contexts[_slotref].codeRef = uint8(_code._instr_count+1);
+      _contexts[_slotref].codeRef = uint8(_instr_count+1);
       // if (_analysis.slotref > _analysis.max_ref) _analysis.max_ref = _analysis.slotref;
       break;
     case INSERT :
@@ -596,25 +618,24 @@ void Machine::Code::decoder::analyse_opcode(const opcode opc, const int8  * arg)
 }
 
 
-void Machine::Code::decoder::emit_opcode(opcode opc, const byte * & bc)
+void Machine::Code::decoder::emit_opcode(opcode, const byte * & bc)
 {
-    // validate_opcode has already turned away opcodes without an
-    // implementation.
-    const opcode_t & op       = _op_to_fn[opc];
-    const size_t     param_sz = op.param_sz == VARARGS ? bc[0] + 1 : op.param_sz;
+    // validate_opcode has already looked up the opcode's implementation,
+    // turned away opcodes that have none, and worked out the size of the
+    // parameters.
+    const size_t     param_sz = _param_sz;
 
     // Add this instruction
-    *_instr++ = op.impl[_code._constraint];
-    ++_code._instr_count;
+    *_instr++ = _impl;
+    ++_instr_count;
 
     // Grab the parameters
     if (param_sz) {
         memcpy(_data, bc, param_sz * sizeof(byte));
         bc               += param_sz;
         _data            += param_sz;
-        _code._data_size += param_sz;
+        _data_size       += param_sz;
     }
-
 }
 
 
@@ -622,7 +643,7 @@ void Machine::Code::decoder::apply_analysis(instr * const code, instr * code_end
 {
     // insert TEMP_COPY commands for slots that need them (that change and are referenced later)
     int tempcount = 0;
-    if (_code._constraint) return;
+    if (_constraint) return;
 
     const instr temp_copy = _op_to_fn[TEMP_COPY].impl[0];
     for (const context * c = _contexts, * const ce = c + _slotref; c < ce; ++c)
@@ -649,7 +670,8 @@ bool Machine::Code::decoder::validate_opcode(const byte opc, const byte * const 
         return false;
     }
     const opcode_t & op = _op_to_fn[opc];
-    if (op.impl[_code._constraint] == 0)
+    _impl = op.impl[_constraint];
+    if (_impl == 0)
     {
         failure(unimplemented_opcode_used);
         return false;
@@ -659,8 +681,8 @@ bool Machine::Code::decoder::validate_opcode(const byte opc, const byte * const 
         failure(arguments_exhausted);
         return false;
     }
-    const size_t param_sz = op.param_sz == VARARGS ? bc[0] + 1 : op.param_sz;
-    if (bc - 1 + param_sz >= _max.bytecode)
+    _param_sz = op.param_sz == VARARGS ? bc[0] + 1 : op.param_sz;
+    if (bc - 1 + _param_sz >= _max.bytecode)
     {
         failure(arguments_exhausted);
         return false;
@@ -678,7 +700,7 @@ bool Machine::Code::decoder::valid_upto(const uint16 limit, const uint16 x) cons
 
 bool Machine::Code::decoder::test_ref(int8 index) const throw()
 {
-    if (_code._constraint && !_in_ctxt_item)
+    if (_constraint && !_in_ctxt_item)
     {
         if (index > 0 || -index > _max.pre_context)
         {
