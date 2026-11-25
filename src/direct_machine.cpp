@@ -30,6 +30,11 @@
 
 #define do_(name)               &&name
 
+// Two of the registers opcodes.h expects are read where they are used: few
+// programs use them, and neither can change while a program runs.
+#define mapb                    (smap.begin()+smap.context())
+#define dir                     smap.dir()
+
 
 using namespace graphite2;
 using namespace vm;
@@ -56,20 +61,24 @@ namespace {
 // So all in all, we need at least the __noinline__ attribute. __noclone__
 // is not supported by clang.
 __attribute__((__noinline__))
-const void * direct_run(const bool          get_table_mode,
-                        const instr       * program,
-                        const byte        * data,
-                        Machine::stack_t  * stack,
-                        slotref         * & __map,
-                        uint8                _dir,
-                        Machine::status_t & status,
-                        SlotMap           * __smap=0)
+Machine::stack_t direct_run(SlotMap           * __smap,
+                            const instr       * program,
+                            const byte        * data,
+                            slotref         * & __map,
+                            Machine::stack_t  * stack,
+                            Machine::status_t & status)
 {
     // We need to define and return to opcode table from within this function
     // other inorder to take the addresses of the instruction bodies.
     #include "inc/opcode_table.h"
-    if (get_table_mode)
-        return opcode_table;
+    // Called without a program this only hands out the opcode table: stack
+    // is then where the caller wants its address.
+    if (!program)
+    {
+        const opcode_t * const table = opcode_table;
+        memcpy(stack, &table, sizeof table);
+        return 0;
+    }
 
     // Declare virtual machine registers
     const instr           * ip = program;
@@ -80,9 +89,7 @@ const void * direct_run(const bool          get_table_mode,
     SlotMap             & smap = *__smap;
     Segment              & seg = smap.segment;
     slotref                 is = *__map,
-                         * map = __map,
-                  * const mapb = smap.begin()+smap.context();
-    uint8                  dir = _dir;
+                         * map = __map;
     int8                 flags = 0;
 
     // start the program
@@ -94,16 +101,27 @@ const void * direct_run(const bool          get_table_mode,
     end:
     __map  = map;
     *__map = is;
-    return sp;
+
+    // The value the program returns is the one value it leaves on the stack.
+    // Anything else on the stack is an error, unless the program has already
+    // reported one. (Machine::check_final_stack says the same.)
+    const Machine::stack_t ret = sp == sb + 1 ? *sp-- : 0;
+    if (status == Machine::finished && sp != sb)
+        status = sp <  sb ? Machine::stack_underflow
+               : sp >= sl ? Machine::stack_overflow
+                          : Machine::stack_not_empty;
+    return ret;
 }
 
 }
 
 const opcode_t * Machine::getOpcodeTable() throw()
 {
+    const opcode_t * table;
     slotref * dummy;
-    Machine::status_t dumstat = Machine::finished;
-    return static_cast<const opcode_t *>(direct_run(true, 0, 0, 0, dummy, 0, dumstat));
+    Machine::status_t dumstat;
+    direct_run(0, 0, 0, dummy, reinterpret_cast<Machine::stack_t *>(&table), dumstat);
+    return table;
 }
 
 
@@ -113,9 +131,5 @@ Machine::stack_t  Machine::run(const instr   * program,
 {
     assert(program != 0);
 
-    const stack_t *sp = static_cast<const stack_t *>(
-                direct_run(false, program, data, _stack, is, _map.dir(), _status, &_map));
-    const stack_t ret = sp == _stack+STACK_GUARD+1 ? *sp-- : 0;
-    check_final_stack(sp);
-    return ret;
+    return direct_run(&_map, program, data, is, _stack, _status);
 }

@@ -83,7 +83,11 @@ public:
     size_t        maxRef() const throw()            { return _max_ref; }
     void          externalProgramMoved(ptrdiff_t) throw();
 
+    // run() is haveSlots() and, if that holds, exec(). haveSlots() does not
+    // depend on the slot the program starts at.
     int32 run(Machine &m, slotref * & map) const;
+    bool  haveSlots(Machine &m) const;
+    int32 exec(Machine &m, slotref * & map) const;
 
     CLASS_NEW_DELETE;
 };
@@ -133,6 +137,14 @@ inline Machine::Code & Machine::Code::operator=(const Machine::Code &rhs) throw(
     _own         = rhs._own;
     rhs._own = false;
     return *this;
+}
+
+inline int32 Machine::Code::exec(Machine & m, slotref * & map) const
+{
+//    assert(_own);
+    assert(*this);          // Check we are actually runnable
+
+    return m.run(_code, _data, map);
 }
 
 inline void Machine::Code::externalProgramMoved(ptrdiff_t dist) throw()

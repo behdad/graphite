@@ -277,4 +277,24 @@ Slot * & SlotMap::operator[](int n)
   return m_slot_map[n + 1];
 }
 
+// The parts of running a program that need the slot map.
+inline
+bool vm::Machine::Code::haveSlots(vm::Machine & m) const
+{
+    const SlotMap & smap = m.slotMap();
+    if (smap.size() <= size_t(_max_ref + smap.context())
+        || smap[_max_ref + smap.context()] == 0)
+    {
+        m._status = Machine::slot_offset_out_bounds;
+        return false;
+    }
+    return true;
+}
+
+inline
+int32 vm::Machine::Code::run(vm::Machine & m, vm::slotref * & map) const
+{
+    return haveSlots(m) ? exec(m, map) : 1;
+}
+
 } // namespace graphite2
