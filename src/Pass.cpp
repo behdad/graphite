@@ -404,16 +404,23 @@ bool Pass::readStates(const byte * starts, const byte *states, const byte * o_ru
     }
 
     State * s = m_states,
-          * const success_begin = m_states + m_numStates - m_numSuccess;
+          * const success_begin = m_states + m_numStates - m_numSuccess,
+          * const states_end = m_states + m_numStates;
     const RuleEntry * rule_map_end = m_ruleMap + be::peek<uint16>(o_rule_map + m_numSuccess*sizeof(uint16));
-    for (size_t n = m_numStates; n; --n, ++s)
+    // The states before the success states have no rules.
+    for (; s != success_begin; ++s)
     {
-        RuleEntry * const begin = s < success_begin ? 0 : m_ruleMap + be::read<uint16>(o_rule_map),
-                  * const end   = s < success_begin ? 0 : m_ruleMap + be::peek<uint16>(o_rule_map);
+        s->rules = 0;
+        s->rules_end = 0;
+    }
+    for (; s != states_end; ++s)
+    {
+        RuleEntry * const begin = m_ruleMap + be::read<uint16>(o_rule_map),
+                  * const end   = m_ruleMap + be::peek<uint16>(o_rule_map);
 
         if (e.test(begin >= rule_map_end || end > rule_map_end || begin > end, E_BADRULEMAPPING))
         {
-            face.error_context((face.error_context() & 0xFFFF00) + EC_ARULEMAP + int(n << 24));
+            face.error_context((face.error_context() & 0xFFFF00) + EC_ARULEMAP + int(size_t(states_end - s) << 24));
             return face.error(e);
         }
         s->rules = begin;
