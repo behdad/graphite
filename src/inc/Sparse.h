@@ -39,10 +39,10 @@ private:
     sparse & operator = (const sparse &);
 
 public:
-    // Sequential access to the values of consecutive keys: constructed at a
-    // key k, each call to next() returns what operator[] would return for
-    // k, k+1, k+2, ... in turn, without redoing the chunk lookup and the
-    // population count for every key.
+    // Sequential access to the values of a few consecutive keys: constructed
+    // at a key k, each call to next() returns what operator[] would return
+    // for k, k+1, k+2, ... in turn, up to k + reader::MAX_KEYS - 1, without
+    // redoing the chunk lookup and the population count for every key.
     class reader;
 
     template<typename I>
@@ -166,54 +166,51 @@ size_t sparse::_sizeof() const throw()
 class sparse::reader
 {
 public:
+    // The most keys that can be read. It is the number of keys in a chunk on
+    // the platforms where a chunk is smallest.
+    enum { MAX_KEYS = 16 };
+
     reader(const sparse & s, const key_type k) throw();
 
     mapped_type next() throw();
 
 private:
-    void        next_chunk() throw();
-
-    const sparse      & m_sparse;
-    const mapped_type * m_value;    // value of the next key present in this chunk
-    mask_t              m_mask;     // this chunk's mask, the next key's bit moved to the top
-    unsigned int        m_left,     // keys left in this chunk
-                        m_chunk;    // index of the next chunk
+    const mapped_type * m_value;    // value of the next key that is present
+    mask_t              m_mask;     // which of the keys still to come are present: a
+                                    // chunk mask with the bit of the next key at its top
 };
 
 inline
-void sparse::reader::next_chunk() throw()
-{
-    if (m_chunk < m_sparse.m_nchunks)
-    {
-        const chunk & c = m_sparse.m_array.map[m_chunk];
-        m_mask  = c.mask;
-        m_value = m_sparse.m_array.values + c.offset;
-    }
-    else
-        m_mask = 0;     // past the end every key is absent
-    m_left = SIZEOF_CHUNK;
-    ++m_chunk;
-}
-
-inline
 sparse::reader::reader(const sparse & s, const key_type k) throw()
-: m_sparse(s), m_value(0), m_mask(0), m_left(0), m_chunk(k/SIZEOF_CHUNK)
+: m_value(0), m_mask(0)
 {
-    const unsigned int skip = k%SIZEOF_CHUNK;
+    const unsigned int n    = k/SIZEOF_CHUNK,   // the chunk k is in
+                       skip = k%SIZEOF_CHUNK;   // the keys of that chunk before k
 
-    next_chunk();
-    // Step over the keys of this chunk that come before k.
-    m_value += bit_set_count(mask_t(m_mask >> (SIZEOF_CHUNK - skip)));
-    m_mask <<= skip;
-    m_left  -= skip;
+    // A chunk's worth of keys from k on: the keys of chunk n from k to its
+    // end, then the first skip keys of chunk n+1.
+    if (n < s.m_nchunks)
+    {
+        const chunk & c = s.m_array.map[n];
+        m_mask  = (mask_t(c.mask) << skip) & ((mask_t(1) << SIZEOF_CHUNK) - 1);
+        m_value = s.m_array.values + c.offset
+                    + bit_set_count(mask_t(mask_t(c.mask) >> (SIZEOF_CHUNK - skip)));
+    }
+    if (skip && n + 1 < s.m_nchunks)
+    {
+        const chunk & c = s.m_array.map[n+1];
+        // The values of a chunk follow those of the chunk before it, so the
+        // values of chunk n+1 are found by stepping on from those of chunk n,
+        // unless chunk n has no keys from k on, when it may have no values.
+        if (!m_mask)
+            m_value = s.m_array.values + c.offset;
+        m_mask |= mask_t(c.mask) >> (SIZEOF_CHUNK - skip);
+    }
 }
 
 inline
 sparse::mapped_type sparse::reader::next() throw()
 {
-    if (m_left == 0) next_chunk();
-    --m_left;
-
     const mask_t present = m_mask & (mask_t(1) << (SIZEOF_CHUNK - 1));
     m_mask <<= 1;
     return present ? *m_value++ : mapped_type(0);
