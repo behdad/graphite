@@ -123,7 +123,8 @@ inline Machine::Code::decoder::decoder(limits & lims, Code &code, enum passtype 
 Machine::Code::Code(bool is_constraint, const byte * bytecode_begin, const byte * const bytecode_end,
            uint8 pre_context, uint16 rule_length, const Silf & silf, const Face & face,
            enum passtype pt, byte * * const _out)
- :  _code(0), _data(0), _data_size(0), _instr_count(0), _max_ref(0), _status(loaded),
+ :  _code(0), _data(0), _data_size(0), _instr_count(0), _max_ref(0),
+    _simple(0), _setters(0), _status(loaded),
     _constraint(is_constraint), _modify(false), _delete(false), _own(_out==0)
 {
 #ifdef GRAPHITE2_TELEMETRY
@@ -774,11 +775,58 @@ void Machine::Code::fuse(const opcode_t * const op) throw()
     if (*last == op[RET_ZERO].impl[0])
     {
         if (last[-1] == next)
+        {
             last[-1] = op[NEXT_RET_ZERO].impl[0];
+            find_setters(op, last - 1);
+        }
     }
     else if (_instr_count > 2 && *last == op[POP_RET].impl[0]
                 && last[-1] == push_byte && last[-2] == next)
         last[-2] = op[NEXT_PUSH_BYTE_POP_RET].impl[0];
+}
+
+
+// Many actions only set attributes of the slot they are started at, from
+// constants or from that slot's own attributes, and then move to the next
+// slot and return zero. Find out whether this is one: nothing but PUT_COPY 0
+// (if anything), then fused setters that refer to no other slot and do not
+// need the slots positioned, then the NEXT+RET_ZERO at end. Code::runSimple
+// runs such a program without the virtual machine.
+void Machine::Code::find_setters(const opcode_t * const op, const instr * const end) throw()
+{
+    // haveSlots() then tests the one slot such a program touches.
+    if (_max_ref != 0)  return;
+
+    const instr * i = _code;
+    const byte  * d = _data;
+    byte     simple = SIMPLE;
+    unsigned kinds  = 0,
+             n      = 0;
+    if (*i == op[PUT_COPY].impl[0])
+    {
+        if (*d != 0)    return;
+        simple |= PUT_COPY_0;
+        ++i; ++d;
+    }
+    for (; i != end; ++n)
+    {
+        unsigned kind;
+        if (n == MAX_SETTERS)   return;
+        if (*i == op[PUSH_BYTE_ATTR_SET].impl[0])
+        {   kind = BYTE_ATTR;       i += 2; d += 2; }
+        else if (*i == op[PUSH_SHORT_ATTR_SET].impl[0])
+        {   kind = SHORT_ATTR;      i += 2; d += 3; }
+        else if (*i == op[PUSH_BYTE_IATTR_SET].impl[0])
+        {   kind = BYTE_IATTR;      i += 2; d += 3; }
+        else if (*i == op[PUSH_SLOT_ATTR_BITSET_ATTR_SET].impl[0]
+                    && d[0] != gr_slatPosX && d[0] != gr_slatPosY && d[1] == 0)
+        {   kind = SLOT_BITS_ATTR;  i += 3; d += 7; }
+        else
+            return;
+        kinds |= kind << 2*n;
+    }
+    _simple  = byte(simple | n << SETTERS_SHIFT);
+    _setters = uint16(kinds);
 }
 
 

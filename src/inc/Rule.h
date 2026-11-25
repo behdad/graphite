@@ -297,4 +297,86 @@ int32 vm::Machine::Code::run(vm::Machine & m, vm::slotref * & map) const
     return haveSlots(m) ? exec(m, map) : 1;
 }
 
+// Runs a simple() action after haveSlots(), without the virtual machine: this
+// does, in the same order, what the instructions of such a program do (see
+// Code::find_setters and opcodes.h). The program refers to no slot but the
+// one it is started at, which haveSlots() has found to be there, and so to be
+// followed in the slot map by at least the entry that NEXT moves to. All its
+// values go through the first stack entry and leave the stack empty.
+// The machine's slotat() refuses a slot offset that leads outside the slot
+// map. The only offset in such a program is 0, from the entry the program is
+// started at (nothing in it moves from there before NEXT), and haveSlots()
+// has found that entry to be inside the map: there is nothing to refuse.
+inline
+int32 vm::Machine::Code::runSimple(vm::Machine & m, vm::slotref * & map) const
+{
+    SlotMap           & smap = m.slotMap();
+    Segment            & seg = smap.segment;
+    assert(map >= smap.begin() && map < smap.end());
+    const vm::slotref     is = *map;
+    const byte          * dp = _data;
+
+    // put_copy 0 is asked to copy the slot onto itself: it copies nothing.
+    if (_simple & PUT_COPY_0)
+    {
+        ++dp;
+        if (!is->isDeleted())
+        {
+            is->markCopied(false);
+            is->markDeleted(false);
+        }
+    }
+
+    for (unsigned n = _simple >> SETTERS_SHIFT, kinds = _setters; n; --n, kinds >>= 2)
+    {
+        attrCode    slat;
+        uint8       idx = 0;
+        int         val;
+        switch (kinds & 3)
+        {
+        case BYTE_ATTR :        // push_byte, attr_set
+            val  = int8(dp[0]);
+            slat = attrCode(uint8(dp[1]));
+            dp  += 2;
+            break;
+        case SHORT_ATTR :       // push_short, attr_set
+        {
+            const int16 r   = int16(dp[0]) << 8
+                            | uint8(dp[1]);
+            val  = r;
+            slat = attrCode(uint8(dp[2]));
+            dp  += 3;
+            break;
+        }
+        case BYTE_IATTR :       // push_byte, iattr_set
+            val  = int8(dp[0]);
+            slat = attrCode(uint8(dp[1]));
+            idx  = uint8(dp[2]);
+            dp  += 3;
+            break;
+        default :               // push_slot_attr of this slot, setbits, attr_set
+        {
+            const int res   = is->getAttr(&seg, attrCode(uint8(dp[0])), 0);
+            const uint16 msk = uint16(dp[2]) << 8
+                             | uint8(dp[3]);
+            const uint16 v   = uint16(dp[4]) << 8
+                             | uint8(dp[5]);
+            val  = (res & ~msk) | v;
+            slat = attrCode(uint8(dp[6]));
+            dp  += 7;
+            break;
+        }
+        }
+        is->setAttr(&seg, slat, idx, val, smap);
+    }
+
+    // next, and what the machine does when a program ends: the slot it has
+    // reached is written to the slot map entry it has reached.
+    if (is == smap.highwater())
+        smap.highpassed(true);
+    *++map = is->next();
+    // ret_zero
+    return 0;
+}
+
 } // namespace graphite2

@@ -48,11 +48,26 @@ public:
 private:
     class decoder;
 
+    // What _simple and _setters say about an action that runSimple can run.
+    enum {
+        SIMPLE = 1,                 // _simple: it is one,
+        PUT_COPY_0 = 2,             //   it starts with PUT_COPY 0,
+        SETTERS_SHIFT = 4,          //   and how many setters follow
+        MAX_SETTERS = 8,
+        // _setters: two bits for each of them, the first in the low bits
+        BYTE_ATTR = 0,              // PUSH_BYTE ATTR_SET
+        SHORT_ATTR,                 // PUSH_SHORT ATTR_SET
+        BYTE_IATTR,                 // PUSH_BYTE IATTR_SET
+        SLOT_BITS_ATTR              // PUSH_SLOT_ATTR BITSET ATTR_SET
+    };
+
     instr *     _code;
     byte  *     _data;
     size_t      _data_size,
                 _instr_count;
     byte        _max_ref;
+    byte        _simple;
+    uint16      _setters;
     mutable status_t _status;
     bool        _constraint,
                 _modify,
@@ -62,6 +77,7 @@ private:
     void release_buffers() throw ();
     void failure(const status_t) throw();
     void fuse(const opcode_t *) throw();
+    void find_setters(const opcode_t *, const instr * end) throw();
 
 public:
     static size_t estimateCodeDataOut(size_t num_bytecodes, int nRules, int nSlots);
@@ -89,6 +105,9 @@ public:
     int32 run(Machine &m, slotref * & map) const;
     bool  haveSlots(Machine &m) const;
     int32 exec(Machine &m, slotref * & map) const;
+    // For a simple() program, runSimple() does what exec() does.
+    bool  simple() const throw()                    { return _simple; }
+    int32 runSimple(Machine &m, slotref * & map) const;
 
     CLASS_NEW_DELETE;
 };
@@ -104,6 +123,7 @@ size_t  Machine::Code::estimateCodeDataOut(size_t n_bc, int nRules, int nSlots)
 
 inline Machine::Code::Code() throw()
 : _code(0), _data(0), _data_size(0), _instr_count(0), _max_ref(0),
+  _simple(0), _setters(0),
   _status(loaded), _constraint(false), _modify(false), _delete(false),
   _own(false)
 {
@@ -115,6 +135,8 @@ inline Machine::Code::Code(const Machine::Code &obj) throw ()
     _data_size(obj._data_size),
     _instr_count(obj._instr_count),
     _max_ref(obj._max_ref),
+    _simple(obj._simple),
+    _setters(obj._setters),
     _status(obj._status),
     _constraint(obj._constraint),
     _modify(obj._modify),
@@ -131,6 +153,8 @@ inline Machine::Code & Machine::Code::operator=(const Machine::Code &rhs) throw(
     _data        = rhs._data;
     _data_size   = rhs._data_size;
     _instr_count = rhs._instr_count;
+    _simple      = rhs._simple;
+    _setters     = rhs._setters;
     _status      = rhs._status;
     _constraint  = rhs._constraint;
     _modify      = rhs._modify;

@@ -1222,7 +1222,9 @@ int Pass::doAction(const Code *codeptr, Slot * & slot_out, vm::Machine & m) cons
     vm::slotref * map = &smap[smap.context()];
     smap.highpassed(false);
 
-    int32 ret = codeptr->run(m, map);
+    int32 ret = 1;
+    if (codeptr->haveSlots(m))
+        ret = codeptr->simple() ? codeptr->runSimple(m, map) : codeptr->exec(m, map);
 
     if (m.status() != Machine::finished)
     {
