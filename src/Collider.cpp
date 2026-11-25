@@ -100,6 +100,63 @@ bool ShiftCollider::initSlot(Segment *seg, Slot *aSlot, const Rect &limit, float
     _seqClass = c->seqClass();
 	_seqProxClass = c->seqProxClass();
     _seqOrder = c->seqOrder();
+
+    // The target's side of the tests that mergeSlot makes on every slot it is
+    // given: worked out here, once, since none of it depends on the other slot.
+    _tbb = bb;
+    _tsb = sb;
+    _tx = _currOffset.x + _currShift.x;
+    _ty = _currOffset.y + _currShift.y;
+    _td = _tx - _ty;
+    _ts = _tx + _ty;
+    for (i = 0; i < 4; ++i)
+    {
+        float otmin, otmax;     // extent of the target across the axis
+        float cmin, cmax;       // target limits along the axis
+        float torg;
+        float lmargin;
+        switch (i) {
+            case 0 :	// x direction
+                otmin = bb.yi + _ty;
+                otmax = bb.ya + _ty;
+                torg = _currOffset.x;
+                cmin = _limit.bl.x + torg;
+                cmax = _limit.tr.x - bb.xi + bb.xa + torg;
+                lmargin = _margin;
+                break;
+            case 1 :	// y direction
+                otmin = bb.xi + _tx;
+                otmax = bb.xa + _tx;
+                torg = _currOffset.y;
+                cmin = _limit.bl.y + torg;
+                cmax = _limit.tr.y - bb.yi + bb.ya + torg;
+                lmargin = _margin;
+                break;
+            case 2 :    // sum
+                otmin = sb.di + _td;
+                otmax = sb.da + _td;
+                torg = _currOffset.x + _currOffset.y;
+                cmin = _limit.bl.x + _limit.bl.y + torg;
+                cmax = _limit.tr.x + _limit.tr.y - sb.si + sb.sa + torg;
+                lmargin = _margin / ISQRT2;
+                break;
+            default :   // diff
+                otmin = sb.si + _ts;
+                otmax = sb.sa + _ts;
+                torg = _currOffset.x - _currOffset.y;
+                cmin = _limit.bl.x - _limit.tr.y + torg;
+                cmax = _limit.tr.x - _limit.bl.y - sb.di + sb.da + torg;
+                lmargin = _margin / ISQRT2;
+                break;
+        }
+        _otmin[i] = otmin;
+        _otmax[i] = otmax;
+        _lmargin[i] = lmargin;
+        _otlo[i] = otmin - lmargin;
+        _othi[i] = otmax + lmargin;
+        _clo[i] = cmin - lmargin;
+        _chi[i] = cmax + lmargin;
+    }
     return true;
 }
 
@@ -250,9 +307,7 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
     const float sd = sx - sy;
     const float ss = sx + sy;
     float vmin, vmax;
-    float omin, omax, otmin, otmax;
-    float cmin, cmax;   // target limits
-    float torg;
+    float omin, omax;
     const GlyphCache &gc = seg->getFace()->glyphs();
     const unsigned short gid = slot->gid();
     if (!gc.check(gid))
@@ -272,18 +327,14 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
                     || (sy + bb.ya + _margin >= _limit.bl.y && sy + bb.yi - _margin <= _limit.tr.y))
 
     {
-        const float tx = _currOffset.x + _currShift.x;
-        const float ty = _currOffset.y + _currShift.y;
-        const float td = tx - ty;
-        const float ts = tx + ty;
+        // What depends on the target alone was worked out by initSlot.
+        const float tx = _tx;
+        const float ty = _ty;
+        const float td = _td;
+        const float ts = _ts;
         const SlantBox &sb = gc.getBoundingSlantBox(gid);
-        const unsigned short tgid = _target->gid();
-        const BBox &tbb = gc.getBoundingBBox(tgid);
-        const SlantBox &tsb = gc.getBoundingSlantBox(tgid);
-        float seq_above_wt = cslot->seqAboveWt();
-        float seq_below_wt = cslot->seqBelowWt();
-        float seq_valign_wt = cslot->seqValignWt();
-        float lmargin;
+        const BBox &tbb = _tbb;
+        const SlantBox &tsb = _tsb;
         // if isAfter, invert orderFlags for diagonal orders.
         if (isAfter)
         {
@@ -291,6 +342,14 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
             orderFlags ^= (sameClass ? 0x3F : 0x3);
             // consider 2 bits at a time, non overlapping. If both bits set, clear them
             orderFlags = orderFlags ^ ((((orderFlags >> 1) & orderFlags) & 0x15) * 3);
+        }
+        // Only the sequence regions, below, use these.
+        float seq_above_wt = 0, seq_below_wt = 0, seq_valign_wt = 0;
+        if (orderFlags)
+        {
+            seq_above_wt = cslot->seqAboveWt();
+            seq_below_wt = cslot->seqBelowWt();
+            seq_valign_wt = cslot->seqValignWt();
         }
 
 #if !defined GRAPHITE2_NTRACING
@@ -301,61 +360,6 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
         // Process main bounding octabox.
         for (int i = 0; i < 4; ++i)
         {
-            switch (i) {
-                case 0 :	// x direction
-                    vmin = max(max(bb.xi - tbb.xa + sx, sb.di - tsb.da + ty + sd), sb.si - tsb.sa - ty + ss);
-                    vmax = min(min(bb.xa - tbb.xi + sx, sb.da - tsb.di + ty + sd), sb.sa - tsb.si - ty + ss);
-                    otmin = tbb.yi + ty;
-                    otmax = tbb.ya + ty;
-                    omin = bb.yi + sy;
-                    omax = bb.ya + sy;
-                    torg = _currOffset.x;
-                    cmin = _limit.bl.x + torg;
-                    cmax = _limit.tr.x - tbb.xi + tbb.xa + torg;
-                    lmargin = _margin;
-                    break;
-                case 1 :	// y direction
-                    vmin = max(max(bb.yi - tbb.ya + sy, tsb.di - sb.da + tx - sd), sb.si - tsb.sa - tx + ss);
-                    vmax = min(min(bb.ya - tbb.yi + sy, tsb.da - sb.di + tx - sd), sb.sa - tsb.si - tx + ss);
-                    otmin = tbb.xi + tx;
-                    otmax = tbb.xa + tx;
-                    omin = bb.xi + sx;
-                    omax = bb.xa + sx;
-                    torg = _currOffset.y;
-                    cmin = _limit.bl.y + torg;
-                    cmax = _limit.tr.y - tbb.yi + tbb.ya + torg;
-                    lmargin = _margin;
-                    break;
-                case 2 :    // sum - moving along the positively-sloped vector, so the boundaries are the
-                            // negatively-sloped boundaries.
-                    vmin = max(max(sb.si - tsb.sa + ss, 2 * (bb.yi - tbb.ya + sy) + td), 2 * (bb.xi - tbb.xa + sx) - td);
-                    vmax = min(min(sb.sa - tsb.si + ss, 2 * (bb.ya - tbb.yi + sy) + td), 2 * (bb.xa - tbb.xi + sx) - td);
-                    otmin = tsb.di + td;
-                    otmax = tsb.da + td;
-                    omin = sb.di + sd;
-                    omax = sb.da + sd;
-                    torg = _currOffset.x + _currOffset.y;
-                    cmin = _limit.bl.x + _limit.bl.y + torg;
-                    cmax = _limit.tr.x + _limit.tr.y - tsb.si + tsb.sa + torg;
-                    lmargin = _margin / ISQRT2;
-                    break;
-                case 3 :    // diff - moving along the negatively-sloped vector, so the boundaries are the
-                            // positively-sloped boundaries.
-                    vmin = max(max(sb.di - tsb.da + sd, 2 * (bb.xi - tbb.xa + sx) - ts), -2 * (bb.ya - tbb.yi + sy) + ts);
-                    vmax = min(min(sb.da - tsb.di + sd, 2 * (bb.xa - tbb.xi + sx) - ts), -2 * (bb.yi - tbb.ya + sy) + ts);
-                    otmin = tsb.si + ts;
-                    otmax = tsb.sa + ts;
-                    omin = sb.si + ss;
-                    omax = sb.sa + ss;
-                    torg = _currOffset.x - _currOffset.y;
-                    cmin = _limit.bl.x - _limit.tr.y + torg;
-                    cmax = _limit.tr.x - _limit.bl.y - tsb.di + tsb.da + torg;
-                    lmargin = _margin / ISQRT2;
-                    break;
-                default :
-                    continue;
-            }
-
 #if !defined GRAPHITE2_NTRACING
             if (dbgout)
                 dbgout->setenv(1, reinterpret_cast<void *>(-1));
@@ -452,14 +456,65 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
                 }
             }
 
-            if (vmax < cmin - lmargin || vmin > cmax + lmargin || omax < otmin - lmargin || omin > otmax + lmargin)
+            // The slot matters on this axis only if it comes within the
+            // margin of the target across the axis (omin, omax against
+            // _otlo, _othi) and the shifts along the axis at which the two
+            // would overlap (vmin, vmax) come within the margin of where the
+            // target may go (_clo, _chi). The first is the cheaper to find out.
+            switch (i) {
+                case 0 :	// x direction
+                    omin = bb.yi + sy;
+                    omax = bb.ya + sy;
+                    if (omax < _otlo[0] || omin > _othi[0])
+                        continue;
+                    vmin = max(max(bb.xi - tbb.xa + sx, sb.di - tsb.da + ty + sd), sb.si - tsb.sa - ty + ss);
+                    vmax = min(min(bb.xa - tbb.xi + sx, sb.da - tsb.di + ty + sd), sb.sa - tsb.si - ty + ss);
+                    break;
+                case 1 :	// y direction
+                    omin = bb.xi + sx;
+                    omax = bb.xa + sx;
+                    if (omax < _otlo[1] || omin > _othi[1])
+                        continue;
+                    vmin = max(max(bb.yi - tbb.ya + sy, tsb.di - sb.da + tx - sd), sb.si - tsb.sa - tx + ss);
+                    vmax = min(min(bb.ya - tbb.yi + sy, tsb.da - sb.di + tx - sd), sb.sa - tsb.si - tx + ss);
+                    break;
+                case 2 :    // sum - moving along the positively-sloped vector, so the boundaries are the
+                            // negatively-sloped boundaries.
+                    omin = sb.di + sd;
+                    omax = sb.da + sd;
+                    if (omax < _otlo[2] || omin > _othi[2])
+                        continue;
+                    vmin = max(max(sb.si - tsb.sa + ss, 2 * (bb.yi - tbb.ya + sy) + td), 2 * (bb.xi - tbb.xa + sx) - td);
+                    vmax = min(min(sb.sa - tsb.si + ss, 2 * (bb.ya - tbb.yi + sy) + td), 2 * (bb.xa - tbb.xi + sx) - td);
+                    break;
+                default :   // diff - moving along the negatively-sloped vector, so the boundaries are the
+                            // positively-sloped boundaries.
+                    omin = sb.si + ss;
+                    omax = sb.sa + ss;
+                    if (omax < _otlo[3] || omin > _othi[3])
+                        continue;
+                    vmin = max(max(sb.di - tsb.da + sd, 2 * (bb.xi - tbb.xa + sx) - ts), -2 * (bb.ya - tbb.yi + sy) + ts);
+                    vmax = min(min(sb.da - tsb.di + sd, 2 * (bb.xa - tbb.xi + sx) - ts), -2 * (bb.yi - tbb.ya + sy) + ts);
+                    break;
+            }
+            if (vmax < _clo[i] || vmin > _chi[i])
                 continue;
+
+            // The target's extent across the axis and the margin measured along it.
+            const float otmin = _otmin[i];
+            const float otmax = _otmax[i];
+            const float lmargin = _lmargin[i];
 
             // Process sub-boxes that are defined for this glyph.
             // We only need to do this if there was in fact a collision with the main octabox.
             uint8 numsub = gc.numSubBounds(gid);
             if (numsub > 0)
             {
+                // The same bounds as for the main box
+                const float otlo = _otlo[i];
+                const float othi = _othi[i];
+                const float clo = _clo[i];
+                const float chi = _chi[i];
                 bool anyhits = false;
                 for (int j = 0; j < numsub; ++j)
                 {
@@ -467,31 +522,39 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
                     const SlantBox &ssb = gc.getSubBoundingSlantBox(gid, j);
                     switch (i) {
                         case 0 :    // x
-                            vmin = max(max(sbb.xi-tbb.xa+sx, ssb.di-tsb.da+sd+ty), ssb.si-tsb.sa+ss-ty);
-                            vmax = min(min(sbb.xa-tbb.xi+sx, ssb.da-tsb.di+sd+ty), ssb.sa-tsb.si+ss-ty);
                             omin = sbb.yi + sy;
                             omax = sbb.ya + sy;
+                            if (omax < otlo || omin > othi)
+                                continue;
+                            vmin = max(max(sbb.xi-tbb.xa+sx, ssb.di-tsb.da+sd+ty), ssb.si-tsb.sa+ss-ty);
+                            vmax = min(min(sbb.xa-tbb.xi+sx, ssb.da-tsb.di+sd+ty), ssb.sa-tsb.si+ss-ty);
                             break;
                         case 1 :    // y
-                            vmin = max(max(sbb.yi-tbb.ya+sy, tsb.di-ssb.da-sd+tx), ssb.si-tsb.sa+ss-tx);
-                            vmax = min(min(sbb.ya-tbb.yi+sy, tsb.da-ssb.di-sd+tx), ssb.sa-tsb.si+ss-tx);
                             omin = sbb.xi + sx;
                             omax = sbb.xa + sx;
+                            if (omax < otlo || omin > othi)
+                                continue;
+                            vmin = max(max(sbb.yi-tbb.ya+sy, tsb.di-ssb.da-sd+tx), ssb.si-tsb.sa+ss-tx);
+                            vmax = min(min(sbb.ya-tbb.yi+sy, tsb.da-ssb.di-sd+tx), ssb.sa-tsb.si+ss-tx);
                             break;
                         case 2 :    // sum
-                            vmin = max(max(ssb.si-tsb.sa+ss, 2*(sbb.yi-tbb.ya+sy)+td), 2*(sbb.xi-tbb.xa+sx)-td);
-                            vmax = min(min(ssb.sa-tsb.si+ss, 2*(sbb.ya-tbb.yi+sy)+td), 2*(sbb.xa-tbb.xi+sx)-td);
                             omin = ssb.di + sd;
                             omax = ssb.da + sd;
+                            if (omax < otlo || omin > othi)
+                                continue;
+                            vmin = max(max(ssb.si-tsb.sa+ss, 2*(sbb.yi-tbb.ya+sy)+td), 2*(sbb.xi-tbb.xa+sx)-td);
+                            vmax = min(min(ssb.sa-tsb.si+ss, 2*(sbb.ya-tbb.yi+sy)+td), 2*(sbb.xa-tbb.xi+sx)-td);
                             break;
-                        case 3 :    // diff
-                            vmin = max(max(ssb.di-tsb.da+sd, 2*(sbb.xi-tbb.xa+sx)-ts), -2*(sbb.ya-tbb.yi+sy)+ts);
-                            vmax = min(min(ssb.da-tsb.di+sd, 2*(sbb.xa-tbb.xi+sx)-ts), -2*(sbb.yi-tbb.ya+sy)+ts);
+                        default :   // diff
                             omin = ssb.si + ss;
                             omax = ssb.sa + ss;
+                            if (omax < otlo || omin > othi)
+                                continue;
+                            vmin = max(max(ssb.di-tsb.da+sd, 2*(sbb.xi-tbb.xa+sx)-ts), -2*(sbb.ya-tbb.yi+sy)+ts);
+                            vmax = min(min(ssb.da-tsb.di+sd, 2*(sbb.xa-tbb.xi+sx)-ts), -2*(sbb.yi-tbb.ya+sy)+ts);
                             break;
                     }
-                    if (vmax < cmin - lmargin || vmin > cmax + lmargin || omax < otmin - lmargin || omin > otmax + lmargin)
+                    if (vmax < clo || vmin > chi)
                         continue;
 
 #if !defined GRAPHITE2_NTRACING
@@ -736,65 +799,192 @@ static float localmin(float al, float au, float bl, float bu, float x)
     return x;
 }
 
-// Return the given edge of the glyph at height y, taking any slant box into account.
-static float get_edge(Segment *seg, const Slot *s, const Position &shift, float y, float width, float margin, bool isRight)
+// Finds the given edge of a slot's glyph at a height y, taking any slant box
+// into account. The KernColliders ask for the edge of the same slot in one
+// horizontal slice after another, so everything that does not depend on y is
+// worked out once per slot, in set(), and at() is left with the arithmetic
+// that involves y.
+namespace
 {
-    const GlyphCache &gc = seg->getFace()->glyphs();
-    unsigned short gid = s->gid();
-    float sx = s->origin().x + shift.x;
-    float sy = s->origin().y + shift.y;
-    uint8 numsub = gc.numSubBounds(gid);
-    float res = isRight ? (float)-1e38 : (float)1e38;
 
-    if (numsub > 0)
+class GlyphEdge
+{
+public:
+    void set(const GlyphCache &gc, const Slot *s, const Position &shift, float margin, bool isRight);
+    float at(float y, float width) const;
+
+private:
+    // The part of a box's contribution that is the same for every slice.
+    struct Box
     {
-        for (int i = 0; i < numsub; ++i)
+        float   ymin,   // bottom of the box less the margin
+                ymax,   // top of the box plus the margin
+                x,      // the box's vertical edge
+                td,     // its diff-diagonal edge, less y
+                ts;     // its sum-diagonal edge, plus y
+    };
+    // A glyph has at most 16 sub-boxes (one per bit of its box bitmap). Any
+    // beyond NCACHED would be worked out afresh for each slice.
+    enum { NCACHED = 16 };
+
+    void subBox(Box &b, int i) const;
+    static void leftEdge(float &res, const Box &b, float y, float hw, float ytop, float ybot);
+    static void rightEdge(float &res, const Box &b, float y, float hw, float ytop, float ybot);
+
+    const GlyphCache  * _gc;
+    Box                 _boxes[NCACHED];    // sub-boxes, or in [0] the whole glyph if it has none
+    float               _sx, _sy;           // slot position
+    float               _margin;
+    float               _d, _s;             // diagonal edges of a glyph without sub-boxes
+    int                 _numsub;
+    unsigned short      _gid;
+    bool                _isRight;
+};
+
+inline
+void GlyphEdge::subBox(Box &b, int i) const
+{
+    const BBox &sbb = _gc->getSubBoundingBBox(_gid, i);
+    const SlantBox &ssb = _gc->getSubBoundingSlantBox(_gid, i);
+    b.ymin = _sy + sbb.yi - _margin;
+    b.ymax = _sy + sbb.ya + _margin;
+    if (_isRight)
+    {
+        b.x  = _sx + sbb.xa + _margin;
+        b.td = _sx - _sy + ssb.da + _margin;
+        b.ts = _sx + _sy + ssb.sa + _margin;
+    }
+    else
+    {
+        b.x  = _sx + sbb.xi - _margin;
+        b.td = _sx - _sy + ssb.di - _margin;
+        b.ts = _sx + _sy + ssb.si - _margin;
+    }
+}
+
+inline
+void GlyphEdge::set(const GlyphCache &gc, const Slot *s, const Position &shift, float margin, bool isRight)
+{
+    _gc = &gc;
+    _gid = s->gid();
+    _sx = s->origin().x + shift.x;
+    _sy = s->origin().y + shift.y;
+    _margin = margin;
+    _isRight = isRight;
+    _numsub = gc.numSubBounds(_gid);
+
+    if (_numsub > 0)
+    {
+        for (int i = 0, n = min(_numsub, int(NCACHED)); i < n; ++i)
+            subBox(_boxes[i], i);
+    }
+    else
+    {
+        const BBox &bb = gc.getBoundingBBox(_gid);
+        const SlantBox &sb = gc.getBoundingSlantBox(_gid);
+        Box &b = _boxes[0];
+        b.ymin = _sy + bb.yi - margin;
+        b.ymax = _sy + bb.ya + margin;
+        b.td = _sx - _sy;
+        b.ts = _sx + _sy;
+        if (isRight)
         {
-            const BBox &sbb = gc.getSubBoundingBBox(gid, i);
-            const SlantBox &ssb = gc.getSubBoundingSlantBox(gid, i);
-            if (sy + sbb.yi - margin > y + width / 2 || sy + sbb.ya + margin < y - width / 2)
-                continue;
-            if (isRight)
+            b.x = _sx + bb.xa;
+            _d = sb.da;
+            _s = sb.sa;
+        }
+        else
+        {
+            b.x = _sx + bb.xi;
+            _d = sb.di;
+            _s = sb.si;
+        }
+    }
+}
+
+// Merge one sub-box into the right edge found so far for the slice at y.
+inline
+void GlyphEdge::rightEdge(float &res, const Box &b, float y, float hw, float ytop, float ybot)
+{
+    if (b.ymin > ytop || b.ymax < ybot)
+        return;
+    float x = b.x;
+    if (x > res)
+    {
+        float td = b.td + y;
+        float ts = b.ts - y;
+        x = localmax(td - hw, td + hw,  ts - hw, ts + hw, x);
+        if (x > res)
+            res = x;
+    }
+}
+
+// Merge one sub-box into the left edge found so far for the slice at y.
+inline
+void GlyphEdge::leftEdge(float &res, const Box &b, float y, float hw, float ytop, float ybot)
+{
+    if (b.ymin > ytop || b.ymax < ybot)
+        return;
+    float x = b.x;
+    if (x < res)
+    {
+        float td = b.td + y;
+        float ts = b.ts - y;
+        x = localmin(td - hw, td + hw, ts - hw, ts + hw, x);
+        if (x < res)
+            res = x;
+    }
+}
+
+inline
+float GlyphEdge::at(float y, float width) const
+{
+    const float hw = width / 2;
+    const float ytop = y + hw;
+    const float ybot = y - hw;
+    float res = _isRight ? (float)-1e38 : (float)1e38;
+
+    if (_numsub > 0)
+    {
+        const int ncached = min(_numsub, int(NCACHED));
+        Box extra;
+        if (_isRight)
+        {
+            for (const Box *b = _boxes, * const e = _boxes + ncached; b != e; ++b)
+                rightEdge(res, *b, y, hw, ytop, ybot);
+            for (int i = ncached; i < _numsub; ++i)
             {
-                float x = sx + sbb.xa + margin;
-                if (x > res)
-                {
-                    float td = sx - sy + ssb.da + margin + y;
-                    float ts = sx + sy + ssb.sa + margin - y;
-                    x = localmax(td - width / 2, td + width / 2,  ts - width / 2, ts + width / 2, x);
-                    if (x > res)
-                        res = x;
-                }
+                subBox(extra, i);
+                rightEdge(res, extra, y, hw, ytop, ybot);
             }
-            else
+        }
+        else
+        {
+            for (const Box *b = _boxes, * const e = _boxes + ncached; b != e; ++b)
+                leftEdge(res, *b, y, hw, ytop, ybot);
+            for (int i = ncached; i < _numsub; ++i)
             {
-                float x = sx + sbb.xi - margin;
-                if (x < res)
-                {
-                    float td = sx - sy + ssb.di - margin + y;
-                    float ts = sx + sy + ssb.si - margin - y;
-                    x = localmin(td - width / 2, td + width / 2, ts - width / 2, ts + width / 2, x);
-                    if (x < res)
-                        res = x;
-                }
+                subBox(extra, i);
+                leftEdge(res, extra, y, hw, ytop, ybot);
             }
         }
     }
     else
     {
-        const BBox &bb = gc.getBoundingBBox(gid);
-        const SlantBox &sb = gc.getBoundingSlantBox(gid);
-        if (sy + bb.yi - margin > y + width / 2 || sy + bb.ya + margin < y - width / 2)
+        const Box &b = _boxes[0];
+        if (b.ymin > ytop || b.ymax < ybot)
             return res;
-        float td = sx - sy + y;
-        float ts = sx + sy - y;
-        if (isRight)
-            res = localmax(td + sb.da - width / 2, td + sb.da + width / 2, ts + sb.sa - width / 2, ts + sb.sa + width / 2, sx + bb.xa) + margin;
+        float td = b.td + y;
+        float ts = b.ts - y;
+        if (_isRight)
+            res = localmax(td + _d - hw, td + _d + hw, ts + _s - hw, ts + _s + hw, b.x) + _margin;
         else
-            res = localmin(td + sb.di - width / 2, td + sb.di + width / 2, ts + sb.si - width / 2, ts + sb.si + width / 2, sx + bb.xi) - margin;
+            res = localmin(td + _d - hw, td + _d + hw, ts + _s - hw, ts + _s + hw, b.x) - _margin;
     }
     return res;
 }
+
+} // end of anonymous namespace
 
 
 bool KernCollider::initSlot(Segment *seg, Slot *aSlot, const Rect &limit, float margin,
@@ -878,28 +1068,50 @@ bool KernCollider::initSlot(Segment *seg, Slot *aSlot, const Rect &limit, float 
         float toffset = c->shift().y - _miny + 1 + s->origin().y;
         int smin = max(0, int((bs.yi + toffset) / _sliceWidth));
         int smax = min(numSlices - 1, int((bs.ya + toffset) / _sliceWidth + 1));
-        for (int i = smin; i <= smax; ++i)
+        GlyphEdge edge;         // set when the first slice needs it
+        bool haveEdge = false;
+        float * const edges = _edges.begin();
+        const float sliceWidth = _sliceWidth;
+        const float ybase = _miny - 1;      // the vertical center of slice i is ybase + (i + .5f) * sliceWidth
+        if (dir & 1)
         {
-            float t;
-            float y = _miny - 1 + (i + .5f) * _sliceWidth; // vertical center of slice
-            if ((dir & 1) && x < _edges[i])
+            for (int i = smin; i <= smax; ++i)
             {
-                t = get_edge(seg, s, c->shift(), y, _sliceWidth, margin, false);
-                if (t < _edges[i])
+                if (x < edges[i])
                 {
-                    _edges[i] = t;
-                    if (t < _xbound)
-                        _xbound = t;
+                    if (!haveEdge)
+                    {
+                        edge.set(gc, s, c->shift(), margin, false);
+                        haveEdge = true;
+                    }
+                    const float t = edge.at(ybase + (i + .5f) * sliceWidth, sliceWidth);
+                    if (t < edges[i])
+                    {
+                        edges[i] = t;
+                        if (t < _xbound)
+                            _xbound = t;
+                    }
                 }
             }
-            else if (!(dir & 1) && x > _edges[i])
+        }
+        else
+        {
+            for (int i = smin; i <= smax; ++i)
             {
-                t = get_edge(seg, s, c->shift(), y, _sliceWidth, margin, true);
-                if (t > _edges[i])
+                if (x > edges[i])
                 {
-                    _edges[i] = t;
-                    if (t > _xbound)
-                        _xbound = t;
+                    if (!haveEdge)
+                    {
+                        edge.set(gc, s, c->shift(), margin, true);
+                        haveEdge = true;
+                    }
+                    const float t = edge.at(ybase + (i + .5f) * sliceWidth, sliceWidth);
+                    if (t > edges[i])
+                    {
+                        edges[i] = t;
+                        if (t > _xbound)
+                            _xbound = t;
+                    }
                 }
             }
         }
@@ -936,25 +1148,38 @@ bool KernCollider::mergeSlot(Segment *seg, Slot *slot, const Position &currShift
         return false;
     bool collides = false;
     bool nooverlap = true;
+    GlyphEdge edge;             // set when the first slice needs it
+    bool haveEdge = false;
+    // Kept in locals over the loop, which changes none of them but mingap.
+    const float * const edges = _edges.begin();
+    const float sliceWidth = _sliceWidth;
+    const float ybase = _miny - 1;      // the vertical center of slice i is ybase + (i + .5f) * sliceWidth
+    const bool hit = _hit;
+    float mingap = _mingap;
 
     for (int i = smin; i <= smax; ++i)
     {
-        float here = _edges[i] * rtl;
+        float here = edges[i] * rtl;
         if (here > (float)9e37)
             continue;
-        if (!_hit || x > here - _mingap - currSpace)
+        if (!hit || x > here - mingap - currSpace)
         {
-            float y = (float)(_miny - 1 + (i + .5f) * _sliceWidth);  // vertical center of slice
+            float y = (float)(ybase + (i + .5f) * sliceWidth);  // vertical center of slice
+            if (!haveEdge)
+            {
+                edge.set(seg->getFace()->glyphs(), slot, currShift, 0., rtl > 0);
+                haveEdge = true;
+            }
             // 2 * currSpace to account for the space that is already separating them and the space we want to add
-            float m = get_edge(seg, slot, currShift, y, _sliceWidth, 0., rtl > 0) * rtl + 2 * currSpace;
+            float m = edge.at(y, sliceWidth) * rtl + 2 * currSpace;
             if (m < (float)-8e37)       // only true if the glyph has a gap in it
                 continue;
             nooverlap = false;
             float t = here - m;
-            // _mingap is positive to shrink
-            if (t < _mingap || (!_hit && !collides))
+            // mingap is positive to shrink
+            if (t < mingap || (!hit && !collides))
             {
-                _mingap = t;
+                mingap = t;
                 collides = true;
             }
 #if !defined GRAPHITE2_NTRACING
@@ -969,6 +1194,7 @@ bool KernCollider::mergeSlot(Segment *seg, Slot *slot, const Position &currShift
         else
             nooverlap = false;
     }
+    _mingap = mingap;
     if (nooverlap)
         _mingap = max(_mingap, _xbound - rtl * (currSpace + _margin + x));
     if (collides && !nooverlap)
@@ -1052,26 +1278,40 @@ void SlotCollision::initFromSlot(Segment *seg, Slot *slot)
 	// The order here must match the order in the grcompiler code,
 	// GrcSymbolTable::AssignInternalGlyphAttrIDs.
     uint16 gid = slot->gid();
-    uint16 aCol = seg->silf()->aCollision(); // flags attr ID
-    const GlyphFace * glyphFace = seg->getFace()->glyphs().glyphSafe(gid);
-    if (!glyphFace)
+    const GlyphCache & gc = seg->getFace()->glyphs();
+    if (gid >= gc.numGlyphs())
         return;
-    const sparse &p = glyphFace->attrs();
-    _flags = p[aCol];
-    _limit = Rect(Position(int16(p[aCol+1]), int16(p[aCol+2])),
-                  Position(int16(p[aCol+3]), int16(p[aCol+4])));
-    _margin = p[aCol+5];
-    _marginWt = p[aCol+6];
 
-    _seqClass = p[aCol+7];
-	_seqProxClass = p[aCol+8];
-    _seqOrder = p[aCol+9];
-	_seqAboveXoff = p[aCol+10];
-	_seqAboveWt = p[aCol+11];
-	_seqBelowXlim = p[aCol+12];
-	_seqBelowWt = p[aCol+13];
-	_seqValignHt = p[aCol+14];
-	_seqValignWt = p[aCol+15];
+    // The sixteen attributes aCol .. aCol+15, in key order: from the table
+    // made with the face if there is one, otherwise from the glyph's own
+    // attributes.
+    uint16 fromGlyph[Silf::NUM_COLL_ATTRS];
+    const uint16 * p = seg->silf()->collisionAttrs(gid);
+    if (!p)
+    {
+        const GlyphFace * glyphFace = gc.glyph(gid);
+        if (!glyphFace)
+            return;
+        sparse::reader r(glyphFace->attrs(), seg->silf()->aCollision());
+        for (int i = 0; i != Silf::NUM_COLL_ATTRS; ++i)
+            fromGlyph[i] = r.next();
+        p = fromGlyph;
+    }
+    _flags = p[0];
+    _limit = Rect(Position(int16(p[1]), int16(p[2])),
+                  Position(int16(p[3]), int16(p[4])));
+    _margin = p[5];
+    _marginWt = p[6];
+
+    _seqClass = p[7];
+	_seqProxClass = p[8];
+    _seqOrder = p[9];
+	_seqAboveXoff = p[10];
+	_seqAboveWt = p[11];
+	_seqBelowXlim = p[12];
+	_seqBelowWt = p[13];
+	_seqValignHt = p[14];
+	_seqValignWt = p[15];
 
     // These attributes do not have corresponding glyph attribute:
     _exclGlyph = 0;

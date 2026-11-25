@@ -59,6 +59,60 @@ namespace
 
     typedef _glat_iterator<uint8>   glat_iterator;
     typedef _glat_iterator<uint16>  glat2_iterator;
+
+    // A decoded glat attribute, laid out so that a pointer to an array of
+    // them can stand in for a _glat_iterator.
+    struct glat_attr
+    {
+        sparse::key_type    first;
+        sparse::mapped_type second;
+    };
+
+    // Decode the glat entries between glat and end into attrs: the same
+    // key and value pairs, in the same order, that a _glat_iterator<W> at
+    // glat yields until it compares equal to one at end, but reading each
+    // entry's key and run length once instead of once per value. Returns how
+    // many there are or -1 if that is more than max.
+    template<typename W>
+    int decode_glat(const byte * e, const byte * const end, glat_attr * const attrs, const int max)
+    {
+        int             num = 0;
+        const byte    * v = e + 2*sizeof(W);
+        while (v < end - 1)
+        {
+            const size_t        key = be::peek<W>(e);
+            const unsigned int  run = be::peek<W>(e+sizeof(W));
+            size_t              n = 0;
+            do
+            {
+                if (num == max) return -1;
+                attrs[num].first  = uint16(key + n);
+                attrs[num].second = be::peek<uint16>(v);
+                ++num;
+                ++n; be::skip<uint16>(v);
+            }
+            while (n != run && v < end - 1);
+            if (n != run) break;
+            e = v; be::skip<W>(v,2);
+        }
+        return num;
+    }
+
+    // Construct glyph with the attributes in the glat entries between glat
+    // and end. Returns how many values those entries hold, or -1 if they
+    // were not counted.
+    template<typename W>
+    int make_glyph(GlyphFace & glyph, const Rect & bbox, const Position & advance,
+                   const byte * const glat, const byte * const end)
+    {
+        glat_attr attrs[64];
+        const int num = decode_glat<W>(glat, end, attrs, sizeof attrs/sizeof attrs[0]);
+        if (num < 0)    // too many for the stack: walk the table instead.
+            new (&glyph) GlyphFace(bbox, advance, _glat_iterator<W>(glat), _glat_iterator<W>(end));
+        else
+            new (&glyph) GlyphFace(bbox, advance, attrs, attrs + num);
+        return num;
+    }
 }
 
 const SlantBox SlantBox::empty = {0,0,0,0};
@@ -196,29 +250,26 @@ GlyphCache::~GlyphCache()
     delete _glyph_loader;
 }
 
-const GlyphFace *GlyphCache::glyph(unsigned short glyphid) const      //result may be changed by subsequent call with a different glyphid
+// The slow path of glyph(): load a glyph that is not in the cache yet.
+// Only reached when the glyphs were not preloaded.
+const GlyphFace *GlyphCache::loadGlyph(unsigned short glyphid) const
 {
-    if (glyphid >= numGlyphs())
-        return _glyphs[0];
     const GlyphFace * & p = _glyphs[glyphid];
-    if (p == 0 && _glyph_loader)
+    int numsubs = 0;
+    GlyphFace * g = new GlyphFace();
+    if (g)  p = _glyph_loader->read_glyph(glyphid, *g, &numsubs);
+    if (!p)
     {
-        int numsubs = 0;
-        GlyphFace * g = new GlyphFace();
-        if (g)  p = _glyph_loader->read_glyph(glyphid, *g, &numsubs);
-        if (!p)
+        delete g;
+        return *_glyphs;
+    }
+    if (_boxes)
+    {
+        _boxes[glyphid] = (GlyphBox *)gralloc<char>(sizeof(GlyphBox) + 8 * numsubs * sizeof(float));
+        if (!_glyph_loader->read_box(glyphid, _boxes[glyphid], *_glyphs[glyphid]))
         {
-            delete g;
-            return *_glyphs;
-        }
-        if (_boxes)
-        {
-            _boxes[glyphid] = (GlyphBox *)gralloc<char>(sizeof(GlyphBox) + 8 * numsubs * sizeof(float));
-            if (!_glyph_loader->read_box(glyphid, _boxes[glyphid], *_glyphs[glyphid]))
-            {
-                free(_boxes[glyphid]);
-                _boxes[glyphid] = 0;
-            }
+            free(_boxes[glyphid]);
+            _boxes[glyphid] = 0;
         }
     }
     return p;
@@ -383,6 +434,7 @@ const GlyphFace * GlyphCache::Loader::read_glyph(unsigned short glyphid, GlyphFa
             return 0;
 
         const uint32 glat_version = be::peek<uint32>(m_pGlat);
+        int num_values;
         if (glat_version >= 0x00030000)
         {
             if (glocs >= gloce)
@@ -400,7 +452,7 @@ const GlyphFace * GlyphCache::Loader::read_glyph(unsigned short glyphid, GlyphFa
             if (gloce - glocs < 2*sizeof(byte)+sizeof(uint16)
                 || gloce - glocs > _num_attrs*(2*sizeof(byte)+sizeof(uint16)))
                     return 0;
-            new (&glyph) GlyphFace(bbox, advance, glat_iterator(m_pGlat + glocs), glat_iterator(m_pGlat + gloce));
+            num_values = make_glyph<uint8>(glyph, bbox, advance, m_pGlat + glocs, m_pGlat + gloce);
         }
         else
         {
@@ -408,9 +460,12 @@ const GlyphFace * GlyphCache::Loader::read_glyph(unsigned short glyphid, GlyphFa
                 || gloce - glocs > _num_attrs*3*sizeof(uint16)
                 || glocs > m_pGlat.size() - 2*sizeof(uint16))
                     return 0;
-            new (&glyph) GlyphFace(bbox, advance, glat2_iterator(m_pGlat + glocs), glat2_iterator(m_pGlat + gloce));
+            num_values = make_glyph<uint16>(glyph, bbox, advance, m_pGlat + glocs, m_pGlat + gloce);
         }
-        if (!glyph.attrs() || glyph.attrs().capacity() > _num_attrs)
+        // The attributes stored are never more than the values they were
+        // made from, so they only need counting when those were too many.
+        if (!glyph.attrs()
+            || ((num_values < 0 || num_values > _num_attrs) && glyph.attrs().capacity() > _num_attrs))
             return 0;
     }
     return &glyph;

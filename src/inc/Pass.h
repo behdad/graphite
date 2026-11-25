@@ -37,7 +37,7 @@ public:
 
     CLASS_NEW_DELETE
 private:
-    void    findNDoRule(Slot* & iSlot, vm::Machine &, FiniteStateMachine& fsm) const;
+    void    findNDoRule(Slot* & iSlot, vm::Machine &, FiniteStateMachine& fsm, const byte * context) const;
     int     doAction(const vm::Machine::Code* codeptr, Slot * & slot_out, vm::Machine &) const;
     bool    testPassConstraint(vm::Machine & m) const;
     bool    testConstraint(const Rule & r, vm::Machine &) const;
@@ -48,8 +48,12 @@ private:
                      Face &, enum passtype pt, Error &e);
     bool    readStates(const byte * starts, const byte * states, const byte * o_rule_map, Face &, Error &e);
     bool    readRanges(const byte * ranges, size_t num_ranges, Error &e);
+    bool    buildFilter(const byte * ranges, size_t num_ranges, Face &, Error &e);
+    bool    couldMatch(const byte * filter, const Slot * slot) const;
     uint16  glyphToCol(const uint16 gid) const;
-    bool    runFSM(FiniteStateMachine & fsm, Slot * slot) const;
+    bool    runFSM(FiniteStateMachine & fsm, Slot * slot, const byte * context) const;
+    bool    runAtCursor(FiniteStateMachine & fsm, Slot * cursor) const;
+    bool    runFrom(FiniteStateMachine & fsm, Slot * slot, unsigned int state, Slot * * free) const;
     void    dumpRuleEventConsidered(const FiniteStateMachine & fsm, const RuleEntry & re) const;
     void    dumpRuleEventOutput(const FiniteStateMachine & fsm, const Rule & r, Slot * os) const;
     void    adjustSlot(int delta, Slot * & slot_out, SlotMap &) const;
@@ -58,7 +62,7 @@ private:
     bool    collisionFinish(Segment *seg, GR_MAYBE_UNUSED json * const dbgout) const;
     bool    resolveCollisions(Segment *seg, Slot *slot, Slot *start, ShiftCollider &coll, bool isRev,
                      int dir, bool &moved, bool &hasCol, json * const dbgout) const;
-    float   resolveKern(Segment *seg, Slot *slot, Slot *start, int dir,
+    float   resolveKern(Segment *seg, Slot *slot, Slot *start, KernCollider &coll, int dir,
                      float &ymin, float &ymax, json *const dbgout) const;
 
     const Silf        * m_silf;
@@ -70,6 +74,9 @@ private:
     State             * m_states;
     vm::Machine::Code * m_codes;
     byte              * m_progs;
+    byte              * m_filter;       // per glyph: whether a rule can match with it at the cursor
+    uint32            * m_filterPairs;  // per column: the columns that can come next in a match
+    byte              * m_context;      // per glyph: whether a run can do without the slots before the cursor
 
     byte   m_numCollRuns;
     byte   m_kernColls;
@@ -81,6 +88,8 @@ private:
     uint16 m_numSuccess;
     uint16 m_successStart;
     uint16 m_numColumns;
+    uint16 m_filterWords;
+    uint16 m_atCursor;      // a state the machine can be in at the cursor
     byte m_minPreCtxt;
     byte m_maxPreCtxt;
     byte m_colThreshold;

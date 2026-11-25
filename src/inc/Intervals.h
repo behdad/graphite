@@ -112,7 +112,9 @@ private:
                 _posm;
 
     void            insert(Exclusion e);
+    void            insert_clipped(Exclusion & e);
     void            remove(float x, float xm);
+    void            remove_clipped(float x, float xm);
     const_iterator  find_exclusion_under(float x) const;
 };
 
@@ -149,6 +151,34 @@ void Zones::initialise(float xmin, float xmax, float margin_len,
 #endif
 }
 
+// insert() and remove() clip what they are given to the zone, and most of the
+// time nothing is left: that test is inline, the work on the list is not.
+inline
+void Zones::insert(Exclusion e)
+{
+#if !defined GRAPHITE2_NTRACING
+    addDebug(&e);
+#endif
+    e.x = max(e.x, _pos);
+    e.xm = min(e.xm, _posm);
+    if (e.x >= e.xm) return;
+
+    insert_clipped(e);
+}
+
+inline
+void Zones::remove(float x, float xm)
+{
+#if !defined GRAPHITE2_NTRACING
+    removeDebug(x, xm);
+#endif
+    x = max(x, _pos);
+    xm = min(xm, _posm);
+    if (x >= xm) return;
+
+    remove_clipped(x, xm);
+}
+
 inline
 void Zones::exclude(float xmin, float xmax) {
     remove(xmin, xmax);
@@ -158,6 +188,11 @@ template<zones_t O>
 inline
 void Zones::weighted(float xmin, float xmax, float f, float a0,
         float m, float xi, float ai, float c, bool nega) {
+#if defined GRAPHITE2_NTRACING
+    // insert() will drop an exclusion that lies outside the zone: do not work
+    // out its weights. (With tracing it has to be built to be logged.)
+    if (max(xmin, _pos) >= min(xmax, _posm)) return;
+#endif
     insert(Exclusion::weighted<O>(xmin, xmax, f, a0, m, xi, ai, c, nega));
 }
 
@@ -168,6 +203,13 @@ void Zones::weightedAxis(int axis, float xmin, float xmax, float f, float a0,
         weighted<XY>(xmin, xmax, f, a0, m, xi, ai, c, nega);
     else
         weighted<SD>(xmin, xmax, f, a0, m, xi, ai, c, nega);
+}
+
+inline
+void Zones::exclude_with_margins(float xmin, float xmax, int axis) {
+    remove(xmin, xmax);
+    weightedAxis(axis, xmin-_margin_len, xmin, 0, 0, _margin_weight, xmin-_margin_len, 0, 0, false);
+    weightedAxis(axis, xmax, xmax+_margin_len, 0, 0, _margin_weight, xmax+_margin_len, 0, 0, false);
 }
 
 #if !defined GRAPHITE2_NTRACING

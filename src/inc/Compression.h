@@ -40,41 +40,23 @@ size_t align(size_t p) {
     return (p + sizeof(unsigned long)-1) & ~(sizeof(unsigned long)-1);
 }
 
+// Copy n bytes to d from s, which is fewer than n bytes before d, so that
+// the copy repeats the bytes between s and d over and over. Each memcpy
+// copies everything written so far, which is a whole number of repeats, to
+// just beyond itself, doubling what there is to copy the next time around.
 inline
-u8 * safe_copy(u8 * d, u8 const * s, size_t n) {
-    while (n--) *d++ = *s++;
-    return d;
-}
-
-inline
-u8 * overrun_copy(u8 * d, u8 const * s, size_t n) {
-    size_t const WS = sizeof(unsigned long);
-    u8 const * e = s + n;
+u8 * repeat_copy(u8 * d, u8 const * const s, size_t n) {
+    size_t span = d - s;
     do
     {
-        unaligned_copy<WS>(d, s);
-        d += WS;
-        s += WS;
+        ::memcpy(d, s, span);
+        d += span;
+        n -= span;
+        span += span;
     }
-    while (s < e);
-    d-=(s-e);
-
-    return d;
-}
-
-
-inline
-u8 * fast_copy(u8 * d, u8 const * s, size_t n) {
-    size_t const WS = sizeof(unsigned long);
-    size_t wn = n/WS;
-    while (wn--)
-    {
-        unaligned_copy<WS>(d, s);
-        d += WS;
-        s += WS;
-    }
-    n &= WS-1;
-    return safe_copy(d, s, n);
+    while (n > span);
+    ::memcpy(d, s, n);
+    return d + n;
 }
 
 

@@ -17,6 +17,7 @@
 #include "inc/GlyphCache.h"
 #include "inc/Machine.h"
 #include "inc/Rule.h"
+#include "inc/Segment.h"
 #include "inc/Silf.h"
 
 #include <cstdio>
@@ -31,19 +32,29 @@
 using namespace graphite2;
 using namespace vm;
 
+// The decoder keeps a dozen or so values going from one opcode to the next.
+// They only stay in registers if the whole of it is compiled into the one
+// function that owns the decoder, so ask for that where we know how.
+#if defined(__GNUC__)
+#define DECODER_INLINE  inline __attribute__((always_inline))
+#elif defined(_MSC_VER)
+#define DECODER_INLINE  __forceinline
+#else
+#define DECODER_INLINE  inline
+#endif
+
 namespace {
 
-inline bool is_return(const instr i) {
-    const opcode_t * opmap = Machine::getOpcodeTable();
+inline bool is_return(const opcode_t * opmap, const instr i) {
     const instr pop_ret  = *opmap[POP_RET].impl,
                 ret_zero = *opmap[RET_ZERO].impl,
                 ret_true = *opmap[RET_TRUE].impl;
     return i == pop_ret || i == ret_zero || i == ret_true;
 }
 
+// No constructors, so that an array of these can be cleared in one go.
 struct context
 {
-    context(uint8 ref=0) : codeRef(ref) {flags.changed=false; flags.referenced=false;}
     struct {
         uint8   changed:1,
                 referenced:1;
@@ -60,38 +71,50 @@ public:
     struct limits;
     static const int NUMCONTEXTS = 256;
 
-    decoder(limits & lims, Code &code, enum passtype pt) throw();
+    DECODER_INLINE decoder(limits & lims, Code &code, enum passtype pt, const opcode_t * op_to_fn,
+                           context * contexts) throw();
 
-    bool        load(const byte * bc_begin, const byte * bc_end);
-    void        apply_analysis(instr * const code, instr * code_end);
+    DECODER_INLINE bool     load(const byte * bc_begin, const byte * bc_end);
+    DECODER_INLINE void     apply_analysis(instr * const code, instr * code_end);
     byte        max_ref() { return _max_ref; }
     int         out_index() const { return _out_index; }
 
 private:
-    void        set_ref(int index) throw();
-    void        set_noref(int index) throw();
-    void        set_changed(int index) throw();
-    opcode      fetch_opcode(const byte * bc);
-    void        analyse_opcode(const opcode, const int8 * const dp) throw();
-    bool        emit_opcode(opcode opc, const byte * & bc);
-    bool        validate_opcode(const byte opc, const byte * const bc);
-    bool        valid_upto(const uint16 limit, const uint16 x) const throw();
-    bool        test_context() const throw();
-    bool        test_ref(int8 index) const throw();
-    bool        test_attr(attrCode attr) const throw();
-    void        failure(const status_t s) const throw() { _code.failure(s); }
+    DECODER_INLINE void     set_ref(int index) throw();
+    DECODER_INLINE void     set_noref(int index) throw();
+    DECODER_INLINE void     set_changed(int index) throw();
+    DECODER_INLINE bool     decode(const byte * bc, const byte * bc_end);
+    DECODER_INLINE opcode   fetch_opcode(const byte * bc);
+    DECODER_INLINE void     analyse_opcode(const opcode, const int8 * const dp) throw();
+    DECODER_INLINE void     emit_opcode(opcode opc, const byte * & bc);
+    DECODER_INLINE bool     validate_opcode(const byte opc, const byte * const bc);
+    DECODER_INLINE bool     valid_upto(const uint16 limit, const uint16 x) const throw();
+    DECODER_INLINE bool     test_context() const throw();
+    DECODER_INLINE bool     test_ref(int8 index) const throw();
+    DECODER_INLINE bool     test_attr(attrCode attr) const throw();
+    void        failure(const status_t s) const throw() { _code.failure(s); _failed = true; }
 
     Code              & _code;
+    // Working copies of what the code object holds, so that they need not
+    // be fetched from it and put back for every opcode. load() brings the
+    // code object's counts up to date when it is done.
+    const bool          _constraint;
+    size_t              _instr_count,
+                        _data_size;
+    mutable bool        _failed;        // whether failure() has been called
+    instr               _impl;          // of the opcode being decoded
+    size_t              _param_sz;
     int                 _out_index;
     uint16              _out_length;
     instr             * _instr;
     byte              * _data;
     limits            & _max;
+    const opcode_t    * _op_to_fn;
     enum passtype       _passtype;
     int                 _stack_depth;
     bool                _in_ctxt_item;
     int16               _slotref;
-    context             _contexts[NUMCONTEXTS];
+    context     * const _contexts;      // NUMCONTEXTS of them, all clear
     byte                _max_ref;
 };
 
@@ -104,17 +127,23 @@ struct Machine::Code::decoder::limits
                      classes,
                      glyf_attrs,
                      features;
-  const byte         attrid[gr_slatMax];
+  const byte       * attrid;            // gr_slatMax of them
 };
 
-inline Machine::Code::decoder::decoder(limits & lims, Code &code, enum passtype pt) throw()
+Machine::Code::decoder::decoder(limits & lims, Code &code, enum passtype pt, const opcode_t * op_to_fn,
+                                context * contexts) throw()
 : _code(code),
+  _constraint(code._constraint),
+  _instr_count(code._instr_count), _data_size(code._data_size),
+  _failed(!code),
+  _impl(0), _param_sz(0),
   _out_index(code._constraint ? 0 : lims.pre_context),
   _out_length(code._constraint ? 1 : lims.rule_length),
-  _instr(code._code), _data(code._data), _max(lims), _passtype(pt),
+  _instr(code._code), _data(code._data), _max(lims), _op_to_fn(op_to_fn), _passtype(pt),
   _stack_depth(0),
   _in_ctxt_item(false),
   _slotref(0),
+  _contexts(contexts),
   _max_ref(0)
 { }
 
@@ -123,7 +152,8 @@ inline Machine::Code::decoder::decoder(limits & lims, Code &code, enum passtype 
 Machine::Code::Code(bool is_constraint, const byte * bytecode_begin, const byte * const bytecode_end,
            uint8 pre_context, uint16 rule_length, const Silf & silf, const Face & face,
            enum passtype pt, byte * * const _out)
- :  _code(0), _data(0), _data_size(0), _instr_count(0), _max_ref(0), _status(loaded),
+ :  _code(0), _data(0), _data_size(0), _instr_count(0), _max_ref(0),
+    _simple(0), _setters(0), _status(loaded),
     _constraint(is_constraint), _modify(false), _delete(false), _own(_out==0)
 {
 #ifdef GRAPHITE2_TELEMETRY
@@ -149,6 +179,16 @@ Machine::Code::Code(bool is_constraint, const byte * bytecode_begin, const byte 
         return;
     }
 
+    // The two arrays are kept out of the limits and the decoder so that
+    // the compiler can hold what is left of those in registers.
+    const byte attrid[gr_slatMax] =
+        {1,1,1,1,1,1,1,1,
+         1,1,1,1,1,1,1,255,
+         1,1,1,1,1,1,1,1,
+         1,1,1,1,1,1,0,0,
+         0,0,0,0,0,0,0,0,
+         0,0,0,0,0,0,0,0,
+         0,0,0,0,0,0,0, silf.numUser()};
     decoder::limits lims = {
         bytecode_end,
         pre_context,
@@ -156,16 +196,11 @@ Machine::Code::Code(bool is_constraint, const byte * bytecode_begin, const byte 
         silf.numClasses(),
         face.glyphs().numAttrs(),
         face.numFeatures(),
-        {1,1,1,1,1,1,1,1,
-         1,1,1,1,1,1,1,255,
-         1,1,1,1,1,1,1,1,
-         1,1,1,1,1,1,0,0,
-         0,0,0,0,0,0,0,0,
-         0,0,0,0,0,0,0,0,
-         0,0,0,0,0,0,0, silf.numUser()}
+        attrid
     };
+    context contexts[decoder::NUMCONTEXTS] = {};
 
-    decoder dec(lims, *this, pt);
+    decoder dec(lims, *this, pt, op_to_fn, contexts);
     if(!dec.load(bytecode_begin, bytecode_end))
        return;
 
@@ -178,7 +213,7 @@ Machine::Code::Code(bool is_constraint, const byte * bytecode_begin, const byte 
     }
 
     // When we reach the end check we've terminated it correctly
-    if (!is_return(_code[_instr_count-1])) {
+    if (!is_return(op_to_fn, _code[_instr_count-1])) {
         failure(missing_return);
         return;
     }
@@ -186,6 +221,7 @@ Machine::Code::Code(bool is_constraint, const byte * bytecode_begin, const byte 
     assert((_constraint && immutable()) || !_constraint);
     dec.apply_analysis(_code, _code + _instr_count);
     _max_ref = dec.max_ref();
+    fuse(op_to_fn);
 
     // Now we know exactly how much code and data the program really needs
     // realloc the buffers to exactly the right size so we don't waste any
@@ -227,20 +263,71 @@ Machine::Code::~Code() throw ()
 
 bool Machine::Code::decoder::load(const byte * bc, const byte * bc_end)
 {
+    const bool loaded = decode(bc, bc_end);
+    _code._instr_count = _instr_count;
+    _code._data_size   = _data_size;
+    return loaded;
+}
+
+bool Machine::Code::decoder::decode(const byte * bc, const byte * bc_end)
+{
+    // What is needed to finish off the context item being decoded, if any.
+    // Context items cannot nest, fetch_opcode sees to that.
+    const byte * outer_end  = 0;    // where the code around the item ends
+    byte       * instr_skip = 0,    // the item's skip counts, to be split
+               * data_skip  = 0;    // once the item has been decoded
+    size_t       ctxt_start = 0;    // instruction count at the item's start
+
     _max.bytecode = bc_end;
-    while (bc < bc_end)
+    for (;;)
     {
-        const opcode opc = fetch_opcode(bc++);
-        if (opc == vm::MAX_OPCODE)
-            return false;
+        while (bc < bc_end)
+        {
+            const opcode opc = fetch_opcode(bc++);
+            if (opc == vm::MAX_OPCODE)
+                return false;
 
-        analyse_opcode(opc, reinterpret_cast<const int8 *>(bc));
+            analyse_opcode(opc, reinterpret_cast<const int8 *>(bc));
 
-        if (!emit_opcode(opc, bc))
-            return false;
+            emit_opcode(opc, bc);
+
+            // decode a context item's code as part of this same loop, as if
+            // it were all there is, so we can split the skip into
+            // instruction and data portions when we reach the end of it.
+            if (opc == CNTXT_ITEM)
+            {
+                assert(_out_index == 0);
+                _in_ctxt_item = true;
+                _out_index = _max.pre_context + int8(_data[-2]);
+                _slotref = int8(_data[-2]);
+                _out_length = _max.rule_length;
+
+                ctxt_start = _instr_count;
+                instr_skip = _data - 1;
+                data_skip  = _data++;
+                ++_data_size;
+                outer_end = bc_end;
+                bc_end = bc + *instr_skip;
+                _max.bytecode = bc_end;
+            }
+        }
+
+        if (!_in_ctxt_item)
+            break;
+
+        // That was the end of a context item, carry on with what follows it.
+        *data_skip  = *instr_skip - byte(_instr_count - ctxt_start);
+        *instr_skip =  byte(_instr_count - ctxt_start);
+        bc_end = outer_end;
+        _max.bytecode = bc_end;
+
+        _out_length = 1;
+        _out_index = 0;
+        _slotref = 0;
+        _in_ctxt_item = false;
     }
 
-    return bool(_code);
+    return !_failed;
 }
 
 // Validation check and fixups.
@@ -458,7 +545,7 @@ opcode Machine::Code::decoder::fetch_opcode(const byte * bc)
             break;
     }
 
-    return bool(_code) ? opcode(opc) : MAX_OPCODE;
+    return _failed ? MAX_OPCODE : opcode(opc);
 }
 
 
@@ -492,7 +579,9 @@ void Machine::Code::decoder::analyse_opcode(const opcode opc, const int8  * arg)
     case NEXT :
     case COPY_NEXT :
       ++_slotref;
-      _contexts[_slotref] = context(uint8(_code._instr_count+1));
+      _contexts[_slotref].flags.changed = false;
+      _contexts[_slotref].flags.referenced = false;
+      _contexts[_slotref].codeRef = uint8(_instr_count+1);
       // if (_analysis.slotref > _analysis.max_ref) _analysis.max_ref = _analysis.slotref;
       break;
     case INSERT :
@@ -529,67 +618,24 @@ void Machine::Code::decoder::analyse_opcode(const opcode opc, const int8  * arg)
 }
 
 
-bool Machine::Code::decoder::emit_opcode(opcode opc, const byte * & bc)
+void Machine::Code::decoder::emit_opcode(opcode, const byte * & bc)
 {
-    const opcode_t * op_to_fn = Machine::getOpcodeTable();
-    const opcode_t & op       = op_to_fn[opc];
-    if (op.impl[_code._constraint] == 0)
-    {
-        failure(unimplemented_opcode_used);
-        return false;
-    }
-
-    const size_t     param_sz = op.param_sz == VARARGS ? bc[0] + 1 : op.param_sz;
+    // validate_opcode has already looked up the opcode's implementation,
+    // turned away opcodes that have none, and worked out the size of the
+    // parameters.
+    const size_t     param_sz = _param_sz;
 
     // Add this instruction
-    *_instr++ = op.impl[_code._constraint];
-    ++_code._instr_count;
+    *_instr++ = _impl;
+    ++_instr_count;
 
     // Grab the parameters
     if (param_sz) {
         memcpy(_data, bc, param_sz * sizeof(byte));
         bc               += param_sz;
         _data            += param_sz;
-        _code._data_size += param_sz;
+        _data_size       += param_sz;
     }
-
-    // recursively decode a context item so we can split the skip into
-    // instruction and data portions.
-    if (opc == CNTXT_ITEM)
-    {
-        assert(_out_index == 0);
-        _in_ctxt_item = true;
-        _out_index = _max.pre_context + int8(_data[-2]);
-        _slotref = int8(_data[-2]);
-        _out_length = _max.rule_length;
-
-        const size_t ctxt_start = _code._instr_count;
-        byte & instr_skip = _data[-1];
-        byte & data_skip  = *_data++;
-        ++_code._data_size;
-        const byte *curr_end = _max.bytecode;
-
-        if (load(bc, bc + instr_skip))
-        {
-            bc += instr_skip;
-            data_skip  = instr_skip - byte(_code._instr_count - ctxt_start);
-            instr_skip =  byte(_code._instr_count - ctxt_start);
-            _max.bytecode = curr_end;
-
-            _out_length = 1;
-            _out_index = 0;
-            _slotref = 0;
-            _in_ctxt_item = false;
-        }
-        else
-        {
-            _out_index = 0;
-            _slotref = 0;
-            return false;
-        }
-    }
-
-    return bool(_code);
 }
 
 
@@ -597,9 +643,9 @@ void Machine::Code::decoder::apply_analysis(instr * const code, instr * code_end
 {
     // insert TEMP_COPY commands for slots that need them (that change and are referenced later)
     int tempcount = 0;
-    if (_code._constraint) return;
+    if (_constraint) return;
 
-    const instr temp_copy = Machine::getOpcodeTable()[TEMP_COPY].impl[0];
+    const instr temp_copy = _op_to_fn[TEMP_COPY].impl[0];
     for (const context * c = _contexts, * const ce = c + _slotref; c < ce; ++c)
     {
         if (!c->flags.referenced || !c->flags.changed) continue;
@@ -616,7 +662,6 @@ void Machine::Code::decoder::apply_analysis(instr * const code, instr * code_end
 }
 
 
-inline
 bool Machine::Code::decoder::validate_opcode(const byte opc, const byte * const bc)
 {
     if (opc >= MAX_OPCODE)
@@ -624,8 +669,9 @@ bool Machine::Code::decoder::validate_opcode(const byte opc, const byte * const 
         failure(invalid_opcode);
         return false;
     }
-    const opcode_t & op = Machine::getOpcodeTable()[opc];
-    if (op.impl[_code._constraint] == 0)
+    const opcode_t & op = _op_to_fn[opc];
+    _impl = op.impl[_constraint];
+    if (_impl == 0)
     {
         failure(unimplemented_opcode_used);
         return false;
@@ -635,8 +681,8 @@ bool Machine::Code::decoder::validate_opcode(const byte opc, const byte * const 
         failure(arguments_exhausted);
         return false;
     }
-    const size_t param_sz = op.param_sz == VARARGS ? bc[0] + 1 : op.param_sz;
-    if (bc - 1 + param_sz >= _max.bytecode)
+    _param_sz = op.param_sz == VARARGS ? bc[0] + 1 : op.param_sz;
+    if (bc - 1 + _param_sz >= _max.bytecode)
     {
         failure(arguments_exhausted);
         return false;
@@ -652,10 +698,9 @@ bool Machine::Code::decoder::valid_upto(const uint16 limit, const uint16 x) cons
     return t;
 }
 
-inline
 bool Machine::Code::decoder::test_ref(int8 index) const throw()
 {
-    if (_code._constraint && !_in_ctxt_item)
+    if (_constraint && !_in_ctxt_item)
     {
         if (index > 0 || -index > _max.pre_context)
         {
@@ -709,7 +754,6 @@ void Machine::Code::failure(const status_t s) throw() {
 }
 
 
-inline
 void Machine::Code::decoder::set_ref(int index) throw() {
     if (index + _slotref < 0 || index + _slotref >= NUMCONTEXTS) return;
     _contexts[index + _slotref].flags.referenced = true;
@@ -717,18 +761,268 @@ void Machine::Code::decoder::set_ref(int index) throw() {
 }
 
 
-inline
 void Machine::Code::decoder::set_noref(int index) throw() {
     if (index + _slotref < 0 || index + _slotref >= NUMCONTEXTS) return;
     if (index + _slotref > _max_ref) _max_ref = index + _slotref;
 }
 
 
-inline
 void Machine::Code::decoder::set_changed(int index) throw() {
     if (index + _slotref < 0 || index + _slotref >= NUMCONTEXTS) return;
     _contexts[index + _slotref].flags.changed= true;
     if (index + _slotref > _max_ref) _max_ref = index + _slotref;
+}
+
+
+// Put a fused instruction (see opcodes.h) in the place of the first
+// instruction of each run that has one.
+void Machine::Code::fuse(const opcode_t * const op) throw()
+{
+    // A fused instruction does not test the stack bounds between the
+    // instructions it stands for. An instruction pushes one value at most and
+    // none is run twice, so a program this short cannot overflow the stack
+    // and those tests could not fail on the upper bound; the fused
+    // instructions see to the lower one themselves.
+    if (_instr_count < 2 || _instr_count >= Machine::STACK_MAX)
+        return;
+    if (_constraint)
+    {
+        find_test(op);
+        return;
+    }
+
+    const instr attr_set  = op[ATTR_SET].impl[0],
+                iattr_set = op[IATTR_SET].impl[0],
+                push_byte = op[PUSH_BYTE].impl[0],
+                next      = op[NEXT].impl[0];
+    instr * const last = _code + _instr_count - 1;
+    for (instr * i = _code; i != last; ++i)
+    {
+        if (i[1] == attr_set)
+        {
+            if (*i == push_byte)
+                *i = op[PUSH_BYTE_ATTR_SET].impl[0];
+            else if (*i == op[PUSH_SHORT].impl[0])
+                *i = op[PUSH_SHORT_ATTR_SET].impl[0];
+            else if (*i == op[PUSH_GLYPH_ATTR].impl[0])
+                *i = op[PUSH_GLYPH_ATTR_ATTR_SET].impl[0];
+            else if (*i == op[PUSH_ATT_TO_GLYPH_ATTR].impl[0])
+                *i = op[PUSH_ATT_TO_GLYPH_ATTR_ATTR_SET].impl[0];
+            else if (*i == op[BITSET].impl[0] && i != _code
+                        && i[-1] == op[PUSH_SLOT_ATTR].impl[0])
+                i[-1] = op[PUSH_SLOT_ATTR_BITSET_ATTR_SET].impl[0];
+        }
+        else if (i[1] == iattr_set && *i == push_byte)
+            *i = op[PUSH_BYTE_IATTR_SET].impl[0];
+    }
+
+    // The usual two ways for an action to end.
+    if (*last == op[RET_ZERO].impl[0])
+    {
+        if (last[-1] == next)
+        {
+            last[-1] = op[NEXT_RET_ZERO].impl[0];
+            find_setters(op, last - 1);
+        }
+    }
+    else if (_instr_count > 2 && *last == op[POP_RET].impl[0]
+                && last[-1] == push_byte && last[-2] == next)
+        last[-2] = op[NEXT_PUSH_BYTE_POP_RET].impl[0];
+}
+
+
+// Many actions only set attributes of the slot they are started at, from
+// constants or from that slot's own attributes, and then move to the next
+// slot and return zero. Find out whether this is one: nothing but PUT_COPY 0
+// (if anything), then fused setters that refer to no other slot and do not
+// need the slots positioned, then the NEXT+RET_ZERO at end. Code::runSimple
+// runs such a program without the virtual machine.
+void Machine::Code::find_setters(const opcode_t * const op, const instr * const end) throw()
+{
+    // haveSlots() then tests the one slot such a program touches.
+    if (_max_ref != 0)  return;
+
+    const instr * i = _code;
+    const byte  * d = _data;
+    byte     simple = SIMPLE;
+    unsigned kinds  = 0,
+             n      = 0;
+    if (*i == op[PUT_COPY].impl[0])
+    {
+        if (*d != 0)    return;
+        simple |= PUT_COPY_0;
+        ++i; ++d;
+    }
+    for (; i != end; ++n)
+    {
+        unsigned kind;
+        if (n == MAX_SETTERS)   return;
+        if (*i == op[PUSH_BYTE_ATTR_SET].impl[0])
+        {   kind = BYTE_ATTR;       i += 2; d += 2; }
+        else if (*i == op[PUSH_SHORT_ATTR_SET].impl[0])
+        {   kind = SHORT_ATTR;      i += 2; d += 3; }
+        else if (*i == op[PUSH_BYTE_IATTR_SET].impl[0])
+        {   kind = BYTE_IATTR;      i += 2; d += 3; }
+        else if (*i == op[PUSH_SLOT_ATTR_BITSET_ATTR_SET].impl[0]
+                    && d[0] != gr_slatPosX && d[0] != gr_slatPosY && d[1] == 0)
+        {   kind = SLOT_BITS_ATTR;  i += 3; d += 7; }
+        else
+            return;
+        kinds |= kind << 2*n;
+    }
+    _simple  = byte(simple | n << SETTERS_SHIFT);
+    _setters = uint16(kinds);
+}
+
+
+// Many constraints test one value of the slot they are run on: a feature or
+// a slot attribute, as it is or compared with a constant, the whole of it
+// perhaps in a context item, which keeps the test to one slot of the rule.
+// Find out whether this is one. Code::test tests such a constraint without
+// the virtual machine.
+void Machine::Code::find_test(const opcode_t * const op) throw()
+{
+    const instr * i = _code,
+                * const last = _code + _instr_count - 1;
+    const byte  * d = _data;
+    unsigned simple = SIMPLE;
+
+    if (*last != op[POP_RET].impl[1])   return;
+    if (*i == op[CNTXT_ITEM].impl[1])
+    {
+        // Stepping over the context item must lead to the return.
+        if (d[1] != last - i - 1)   return;
+        simple |= CONTEXT_ITEM;
+        ++i; d += 3;
+    }
+
+    // The value: of the slot itself, and not its position, which would have
+    // the slots positioned first.
+    if (*i == op[PUSH_FEAT].impl[1])
+        simple |= FEAT << VALUE_SHIFT;
+    else if (*i == op[PUSH_SLOT_ATTR].impl[1] && d[0] != gr_slatPosX && d[0] != gr_slatPosY)
+        simple |= SLOT_ATTR << VALUE_SHIFT;
+    else if (*i == op[PUSH_ISLOT_ATTR].impl[1] && d[0] != gr_slatPosX && d[0] != gr_slatPosY)
+        simple |= ISLOT_ATTR << VALUE_SHIFT;
+    else
+        return;
+    if (d[1] != 0)  return;
+
+    opcode compare = NOP;
+    if (++i != last)
+    {
+        if (*i == op[PUSH_BYTE].impl[1])
+            simple |= BYTE << WITH_SHIFT;
+        else if (*i == op[PUSH_SHORT].impl[1])
+            simple |= SHORT << WITH_SHIFT;
+        else
+            return;
+        if (++i == last)    return;
+        for (compare = EQUAL; *i != op[compare].impl[1]; compare = opcode(compare + 1))
+            if (compare == GTR_EQ)  return;
+        if (++i != last)    return;
+    }
+    _simple  = byte(simple);
+    _setters = uint16(compare);
+}
+
+
+// Whether this, the constraint of the rule, holds for the slots of the rule:
+// whether, run on each of them that is not null, it returns true. (That the
+// slot map holds them, Pass::testConstraint has made sure.)
+bool Machine::Code::test(Machine & m, const Rule & rule) const
+{
+    // A constraint cannot change the slot map, so whether the slots it refers
+    // to are there is the same for every slot it is run on. At least one is:
+    // the rule's last, which Pass::testConstraint has looked at.
+    if (!haveSlots(m))  return false;
+
+    SlotMap     & smap = m.slotMap();
+    slotref      * map = &smap[smap.context() - rule.preContext];
+    int      num_slots = rule.sort;
+    if (!_simple)
+    {
+        for (; num_slots; --num_slots, ++map)
+        {
+            if (!*map) continue;
+            const int32 ret = exec(m, map);
+            if (!ret || m.status() != Machine::finished)
+                return false;
+        }
+        return true;
+    }
+
+    // A simple() constraint (see find_test) is not run. The value it tests
+    // is one of the slot the program is run on, which is not null, so it is
+    // always pushed, and nothing the program does can fail or change
+    // anything: what it returns is all there is to it. That includes the
+    // machine's slotat(), which refuses a slot offset that leads outside the
+    // slot map: the only offset here is 0, from an entry of one of the
+    // rule's slots, and those entries are all inside the map (see above).
+    const Segment & seg = smap.segment;
+    const byte     * dp = _data;
+    if (_simple & CONTEXT_ITEM)
+    {
+        // Run on any slot but the one it names, a context item is stepped
+        // over and true pushed in its place, which the program then returns.
+        const int n = int8(dp[0]) + rule.preContext;
+        if (n < 0 || n >= num_slots)    return true;
+        map += n;
+        num_slots = 1;
+        dp += 3;
+    }
+
+    const unsigned value = _simple >> VALUE_SHIFT & VALUE_MASK,
+                   with  = _simple >> WITH_SHIFT & WITH_MASK;
+    for (; num_slots; --num_slots, ++map)
+    {
+        assert(map >= smap.begin() && map < smap.end());
+        const Slot * const slot = *map;
+        if (!slot)  continue;
+
+        const byte * param = dp;
+        int32 val;
+        if (value == FEAT)                  // push_feat
+        {
+            const uint8 fid = seg.charinfo(slot->original())->fid();
+            val = seg.getFeature(fid, uint8(param[0]));
+            param += 2;
+        }
+        else if (value == SLOT_ATTR)        // push_slot_attr
+        {
+            val = slot->getAttr(&seg, attrCode(uint8(param[0])), 0);
+            param += 2;
+        }
+        else                                // push_islot_attr
+        {
+            val = slot->getAttr(&seg, attrCode(uint8(param[0])), uint8(param[2]));
+            param += 3;
+        }
+
+        if (with != NOTHING)
+        {
+            int32 c;
+            if (with == BYTE)               // push_byte
+                c = int8(param[0]);
+            else                            // push_short
+            {
+                const int16 r   = int16(param[0]) << 8
+                                | uint8(param[1]);
+                c = r;
+            }
+            switch (_setters)
+            {
+            case EQUAL :    val = uint32(val) == uint32(c); break;
+            case NOT_EQ :   val = uint32(val) != uint32(c); break;
+            case LESS :     val = val <  c; break;
+            case GTR :      val = val >  c; break;
+            case LESS_EQ :  val = val <= c; break;
+            default :       val = val >= c; break;      // GTR_EQ
+            }
+        }
+        if (!val)   return false;
+    }
+    return true;
 }
 
 
@@ -739,21 +1033,4 @@ void Machine::Code::release_buffers() throw()
     _code = 0;
     _data = 0;
     _own  = false;
-}
-
-
-int32 Machine::Code::run(Machine & m, slotref * & map) const
-{
-//    assert(_own);
-    assert(*this);          // Check we are actually runnable
-
-    if (m.slotMap().size() <= size_t(_max_ref + m.slotMap().context())
-        || m.slotMap()[_max_ref + m.slotMap().context()] == 0)
-    {
-        m._status = Machine::slot_offset_out_bounds;
-        return 1;
-//        return m.run(_code, _data, map);
-    }
-
-    return  m.run(_code, _data, map);
 }

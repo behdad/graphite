@@ -99,7 +99,13 @@ enum opcode {
     BITSET,                         SET_FEAT,
     MAX_OPCODE,
     // private opcodes for internal use only, comes after all other on disk opcodes
-    TEMP_COPY = MAX_OPCODE
+    TEMP_COPY = MAX_OPCODE,
+    // fused opcodes: each does the work of a run of the opcodes above
+    PUSH_BYTE_ATTR_SET,             PUSH_SHORT_ATTR_SET,
+    PUSH_BYTE_IATTR_SET,
+    PUSH_GLYPH_ATTR_ATTR_SET,       PUSH_ATT_TO_GLYPH_ATTR_ATTR_SET,
+    PUSH_SLOT_ATTR_BITSET_ATTR_SET,
+    NEXT_RET_ZERO,                  NEXT_PUSH_BYTE_POP_RET
 };
 
 struct opcode_t

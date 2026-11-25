@@ -17,6 +17,7 @@ namespace graphite2 {
 
 class Silf;
 class Face;
+struct Rule;
 
 enum passtype {
     PASS_TYPE_UNKNOWN = 0,
@@ -48,11 +49,42 @@ public:
 private:
     class decoder;
 
+    // What _simple and _setters say about an action that runSimple can run.
+    enum {
+        SIMPLE = 1,                 // _simple: it is one,
+        PUT_COPY_0 = 2,             //   it starts with PUT_COPY 0,
+        SETTERS_SHIFT = 4,          //   and how many setters follow
+        MAX_SETTERS = 8,
+        // _setters: two bits for each of them, the first in the low bits
+        BYTE_ATTR = 0,              // PUSH_BYTE ATTR_SET
+        SHORT_ATTR,                 // PUSH_SHORT ATTR_SET
+        BYTE_IATTR,                 // PUSH_BYTE IATTR_SET
+        SLOT_BITS_ATTR              // PUSH_SLOT_ATTR BITSET ATTR_SET
+    };
+    // And about a constraint that test can tell about without running it.
+    enum {
+        // SIMPLE = 1               // _simple: it is one,
+        CONTEXT_ITEM = 2,           //   all of it is in one CNTXT_ITEM,
+        VALUE_SHIFT = 2,            //   the value it tests is pushed by
+        VALUE_MASK = 3,
+        FEAT = 0,                   //     PUSH_FEAT
+        SLOT_ATTR,                  //     PUSH_SLOT_ATTR
+        ISLOT_ATTR,                 //     PUSH_ISLOT_ATTR
+        WITH_SHIFT = 4,             //   and tested as it is or compared with
+        WITH_MASK = 3,
+        NOTHING = 0,
+        BYTE,                       //     PUSH_BYTE
+        SHORT                       //     PUSH_SHORT
+        // _setters: the opcode that compares them
+    };
+
     instr *     _code;
     byte  *     _data;
     size_t      _data_size,
                 _instr_count;
     byte        _max_ref;
+    byte        _simple;
+    uint16      _setters;
     mutable status_t _status;
     bool        _constraint,
                 _modify,
@@ -61,6 +93,9 @@ private:
 
     void release_buffers() throw ();
     void failure(const status_t) throw();
+    void fuse(const opcode_t *) throw();
+    void find_setters(const opcode_t *, const instr * end) throw();
+    void find_test(const opcode_t *) throw();
 
 public:
     static size_t estimateCodeDataOut(size_t num_bytecodes, int nRules, int nSlots);
@@ -83,7 +118,17 @@ public:
     size_t        maxRef() const throw()            { return _max_ref; }
     void          externalProgramMoved(ptrdiff_t) throw();
 
+    // run() is haveSlots() and, if that holds, exec(). haveSlots() does not
+    // depend on the slot the program starts at.
     int32 run(Machine &m, slotref * & map) const;
+    bool  haveSlots(Machine &m) const;
+    int32 exec(Machine &m, slotref * & map) const;
+    // For a simple() action, runSimple() does what exec() does.
+    bool  simple() const throw()                    { return _simple; }
+    int32 runSimple(Machine &m, slotref * & map) const;
+    // Whether this, the constraint of the rule, holds for the slots that the
+    // slot map has for the rule: whether exec() returns true for them all.
+    bool  test(Machine &m, const Rule &) const;
 
     CLASS_NEW_DELETE;
 };
@@ -99,6 +144,7 @@ size_t  Machine::Code::estimateCodeDataOut(size_t n_bc, int nRules, int nSlots)
 
 inline Machine::Code::Code() throw()
 : _code(0), _data(0), _data_size(0), _instr_count(0), _max_ref(0),
+  _simple(0), _setters(0),
   _status(loaded), _constraint(false), _modify(false), _delete(false),
   _own(false)
 {
@@ -110,6 +156,8 @@ inline Machine::Code::Code(const Machine::Code &obj) throw ()
     _data_size(obj._data_size),
     _instr_count(obj._instr_count),
     _max_ref(obj._max_ref),
+    _simple(obj._simple),
+    _setters(obj._setters),
     _status(obj._status),
     _constraint(obj._constraint),
     _modify(obj._modify),
@@ -126,6 +174,8 @@ inline Machine::Code & Machine::Code::operator=(const Machine::Code &rhs) throw(
     _data        = rhs._data;
     _data_size   = rhs._data_size;
     _instr_count = rhs._instr_count;
+    _simple      = rhs._simple;
+    _setters     = rhs._setters;
     _status      = rhs._status;
     _constraint  = rhs._constraint;
     _modify      = rhs._modify;
@@ -133,6 +183,14 @@ inline Machine::Code & Machine::Code::operator=(const Machine::Code &rhs) throw(
     _own         = rhs._own;
     rhs._own = false;
     return *this;
+}
+
+inline int32 Machine::Code::exec(Machine & m, slotref * & map) const
+{
+//    assert(_own);
+    assert(*this);          // Check we are actually runnable
+
+    return m.run(_code, _data, map);
 }
 
 inline void Machine::Code::externalProgramMoved(ptrdiff_t dist) throw()

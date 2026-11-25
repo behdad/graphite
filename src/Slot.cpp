@@ -62,70 +62,162 @@ void Slot::update(int /*numGrSlots*/, int numCharInfo, Position &relpos)
     m_position = m_position + relpos;
 }
 
+Slot::Positioning::Positioning(const Segment *seg, const Font *aFont, Rect *aBbox, uint8 aAttrLevel, bool isRtl, bool isFinal)
+: font(aFont),
+  glyphs(&seg->getFace()->glyphs()),
+  collisions(isFinal ? seg->collisions() : NULL),
+  bbox(aBbox),
+  scale(aFont ? aFont->scale() : 1.0f),
+  dirSign(isRtl * -2 + 1),
+  clusterMin(0),
+  attrLevel(aAttrLevel),
+  rtl(isRtl),
+  plain(!aFont && !aBbox && !aAttrLevel)
+{
+}
+
 Position Slot::finalise(const Segment *seg, const Font *font, Position & base, Rect & bbox, uint8 attrLevel, float & clusterMin, bool rtl, bool isFinal, int depth)
 {
-    SlotCollision *coll = NULL;
-    if (depth > 100 || (attrLevel && m_attLevel > attrLevel)) return Position(0, 0);
-    float scale = font ? font->scale() : 1.0f;
-    Position shift(m_shift.x * (rtl * -2 + 1) + m_just, m_shift.y);
-    float tAdvance = m_advance.x + m_just;
-    if (isFinal && (coll = seg->collisionInfo(this)))
+    // With a bbox to fill this is never the plain case. A slot that is not
+    // attached is done by finaliseBases(), alone: where its links lead is
+    // not looked at, which after Segment::justify() may be to itself.
+    Positioning p(seg, font, &bbox, attrLevel, rtl, isFinal);
+    p.clusterMin = clusterMin;
+    const Position res = m_parent ? Position(finaliseAttached<false>(p, base, depth), 0)
+                                  : finaliseBases<false>(p, this, NULL, false, base, depth, true);
+    clusterMin = p.clusterMin;
+    return res;
+}
+
+// Position the clusters whose bases are among the slots from first up to end
+// (or the end of the segment), each starting where the one before it ended
+// and the first at the origin. Returns where the last one ends.
+Position Slot::finaliseClusters(Positioning & p, Slot * first, const Slot * end, bool backwards)
+{
+    return p.plain ? finaliseBases<true>(p, first, end, backwards, Position(0, 0), 0, false)
+                   : finaliseBases<false>(p, first, end, backwards, Position(0, 0), 0, false);
+}
+
+// The three functions below are compiled twice. PLAIN is for a Positioning
+// that is plain: with no font there is nothing to scale or hint, with no bbox
+// nothing to measure, and with no attachment level no slot to leave out, so
+// the glyph is not needed and the scale is 1. That is how the passes position
+// slots. The other version does everything.
+
+// How far this slot is moved from where it would otherwise go, and how far
+// it advances, in the units of the font. Returns the glyph's metrics, unless
+// PLAIN.
+template <bool PLAIN>
+inline
+const GlyphFace * Slot::place(const Positioning & p, Position & shift, float & tAdvance) const
+{
+    shift = Position(m_shift.x * p.dirSign + m_just, m_shift.y);
+    tAdvance = m_advance.x + m_just;
+    if (p.collisions)
     {
-        const Position &collshift = coll->offset();
-        if (!(coll->flags() & SlotCollision::COLL_KERN) || rtl)
-            shift = shift + collshift;
+        const SlotCollision & coll = p.collisions[m_index];
+        if (!(coll.flags() & SlotCollision::COLL_KERN) || p.rtl)
+            shift = shift + coll.offset();
     }
-    const GlyphFace * glyphFace = seg->getFace()->glyphs().glyphSafe(glyph());
-    if (font)
+    if (PLAIN)
+        return NULL;
+    const GlyphFace * glyphFace = p.glyphs->glyphSafe(glyph());
+    if (p.font)
     {
-        scale = font->scale();
-        shift *= scale;
-        if (font->isHinted() && glyphFace)
-            tAdvance = (m_advance.x - glyphFace->theAdvance().x + m_just) * scale + font->advance(glyph());
+        shift *= p.scale;
+        if (p.font->isHinted() && glyphFace)
+            tAdvance = (m_advance.x - glyphFace->theAdvance().x + m_just) * p.scale + p.font->advance(glyph());
         else
-            tAdvance *= scale;
+            tAdvance *= p.scale;
     }
-    Position res;
+    return glyphFace;
+}
+
+// finalise() for the slots from s up to end that are not attached to another:
+// each is put where the one before it ended, the first at currpos. With alone
+// it is s and no other slot.
+template <bool PLAIN>
+inline
+Position Slot::finaliseBases(Positioning & p, Slot * s, const Slot * const end, const bool backwards, Position currpos, const int depth, const bool alone)
+{
+    const float scale = PLAIN ? 1.0f : p.scale;
+
+    for (; s && s != end; s = alone ? NULL : backwards ? s->m_prev : s->m_next)
+    {
+        if (s->m_parent) continue;
+        if (depth > 100 || (!PLAIN && p.attrLevel && s->m_attLevel > p.attrLevel))
+        {
+            currpos = Position(0, 0);
+            continue;
+        }
+
+        Position shift;
+        float tAdvance;
+        const GlyphFace * glyphFace = s->place<PLAIN>(p, shift, tAdvance);
+
+        s->m_position = currpos + shift;
+        Position res = currpos + Position(tAdvance, s->m_advance.y * scale);
+        p.clusterMin = s->m_position.x;
+
+        if (!PLAIN && glyphFace && p.bbox)
+        {
+            Rect ourBbox = glyphFace->theBBox() * scale + s->m_position;
+            *p.bbox = p.bbox->widen(ourBbox);
+        }
+
+        if (s->m_child && s->m_child != s && s->m_child->attachedTo() == s)
+        {
+            const float tRes = s->m_child->finaliseAttached<PLAIN>(p, s->m_position, depth + 1);
+            if (tRes > res.x) res = Position(tRes, 0);
+        }
+
+        if (p.clusterMin < currpos.x)
+        {
+            Position adj = Position(s->m_position.x - p.clusterMin, 0.);
+            res += adj;
+            s->m_position += adj;
+            if (s->m_child) s->m_child->floodShift(adj);
+        }
+        currpos = res;
+    }
+    return currpos;
+}
+
+// finalise() for a slot that is attached to another. All the slots finalise()
+// goes on to from the one it is given are, and what such a slot returns always
+// has a y of zero, so only the x is returned.
+template <bool PLAIN>
+float Slot::finaliseAttached(Positioning & p, const Position & base, int depth)
+{
+    if (depth > 100 || (!PLAIN && p.attrLevel && m_attLevel > p.attrLevel)) return 0.f;
+    const float scale = PLAIN ? 1.0f : p.scale;
+
+    Position shift;
+    float tAdvance;
+    const GlyphFace * glyphFace = place<PLAIN>(p, shift, tAdvance);
 
     m_position = base + shift;
-    if (!m_parent)
-    {
-        res = base + Position(tAdvance, m_advance.y * scale);
-        clusterMin = m_position.x;
-    }
-    else
-    {
-        float tAdv;
-        m_position += (m_attach - m_with) * scale;
-        tAdv = m_advance.x >= 0.5f ? m_position.x + tAdvance - shift.x : 0.f;
-        res = Position(tAdv, 0);
-        if ((m_advance.x >= 0.5f || m_position.x < 0) && m_position.x < clusterMin) clusterMin = m_position.x;
-    }
+    m_position += (m_attach - m_with) * scale;
+    const bool advances = m_advance.x >= 0.5f;
+    float res = advances ? m_position.x + tAdvance - shift.x : 0.f;
+    if ((advances || m_position.x < 0) && m_position.x < p.clusterMin) p.clusterMin = m_position.x;
 
-    if (glyphFace)
+    if (!PLAIN && glyphFace && p.bbox)
     {
         Rect ourBbox = glyphFace->theBBox() * scale + m_position;
-        bbox = bbox.widen(ourBbox);
+        *p.bbox = p.bbox->widen(ourBbox);
     }
 
     if (m_child && m_child != this && m_child->attachedTo() == this)
     {
-        Position tRes = m_child->finalise(seg, font, m_position, bbox, attrLevel, clusterMin, rtl, isFinal, depth + 1);
-        if ((!m_parent || m_advance.x >= 0.5f) && tRes.x > res.x) res = tRes;
+        const float tRes = m_child->finaliseAttached<PLAIN>(p, m_position, depth + 1);
+        if (advances && tRes > res) res = tRes;
     }
 
-    if (m_parent && m_sibling && m_sibling != this && m_sibling->attachedTo() == m_parent)
+    if (m_sibling && m_sibling != this && m_sibling->attachedTo() == m_parent)
     {
-        Position tRes = m_sibling->finalise(seg, font, base, bbox, attrLevel, clusterMin, rtl, isFinal, depth + 1);
-        if (tRes.x > res.x) res = tRes;
-    }
-
-    if (!m_parent && clusterMin < base.x)
-    {
-        Position adj = Position(m_position.x - clusterMin, 0.);
-        res += adj;
-        m_position += adj;
-        if (m_child) m_child->floodShift(adj);
+        const float tRes = m_sibling->finaliseAttached<PLAIN>(p, base, depth + 1);
+        if (tRes > res) res = tRes;
     }
     return res;
 }
@@ -170,12 +262,6 @@ int32 Slot::clusterMetric(const Segment *seg, uint8 metric, uint8 attrLevel, boo
 
 int Slot::getAttr(const Segment *seg, attrCode ind, uint8 subindex) const
 {
-    if (ind >= gr_slatJStretch && ind < gr_slatJStretch + 20 && ind != gr_slatJWidth)
-    {
-        int indx = ind - gr_slatJStretch;
-        return getJustify(seg, indx / 5, indx % 5);
-    }
-
     switch (ind)
     {
     case gr_slatAdvX :      return int(m_advance.x);
@@ -227,7 +313,15 @@ int Slot::getAttr(const Segment *seg, attrCode ind, uint8 subindex) const
     case gr_slatSeqBelowWt:	SLOTGETCOLATTR(seqBelowWt())
     case gr_slatSeqValignHt:SLOTGETCOLATTR(seqValignHt())
     case gr_slatSeqValignWt:SLOTGETCOLATTR(seqValignWt())
-    default : return 0;
+    default :
+        // The justification attributes of every level; gr_slatJWidth, which
+        // lies among them, is not one of them and has its case above.
+        if (ind >= gr_slatJStretch && ind < gr_slatJStretch + 20)
+        {
+            int indx = ind - gr_slatJStretch;
+            return getJustify(seg, indx / 5, indx % 5);
+        }
+        return 0;
     }
 }
 
@@ -244,19 +338,6 @@ int Slot::getAttr(const Segment *seg, attrCode ind, uint8 subindex) const
 
 void Slot::setAttr(Segment *seg, attrCode ind, uint8 subindex, int16 value, const SlotMap & map)
 {
-    if (ind == gr_slatUserDefnV1)
-    {
-        ind = gr_slatUserDefn;
-        subindex = 0;
-        if (seg->numAttrs() == 0)
-            return;
-    }
-    else if (ind >= gr_slatJStretch && ind < gr_slatJStretch + 20 && ind != gr_slatJWidth)
-    {
-        int indx = ind - gr_slatJStretch;
-        return setJustify(seg, indx / 5, indx % 5, value);
-    }
-
     switch (ind)
     {
     case gr_slatAdvX :  m_advance.x = value; break;
@@ -320,6 +401,10 @@ void Slot::setAttr(Segment *seg, attrCode ind, uint8 subindex, int16 value, cons
     case gr_slatMeasureEol :    break;
     case gr_slatJWidth :    just(value); break;
     case gr_slatSegSplit :  seg->charinfo(m_original)->addflags(value & 3); break;
+    case gr_slatUserDefnV1 :
+        if (seg->numAttrs() != 0)
+            m_userAttr[0] = value;
+        break;
     case gr_slatUserDefn :  m_userAttr[subindex] = value; break;
     case gr_slatColFlags :  {
         SlotCollision *c = seg->collisionInfo(this);
@@ -345,6 +430,13 @@ void Slot::setAttr(Segment *seg, attrCode ind, uint8 subindex, int16 value, cons
     case gr_slatSeqValignHt :	SLOTCOLSETATTR(setSeqValignHt(value))
     case gr_slatSeqValignWt :	SLOTCOLSETATTR(setSeqValignWt(value))
     default :
+        // The justification attributes of every level; gr_slatJWidth, which
+        // lies among them, is not one of them and has its case above.
+        if (ind >= gr_slatJStretch && ind < gr_slatJStretch + 20)
+        {
+            int indx = ind - gr_slatJStretch;
+            setJustify(seg, indx / 5, indx % 5, value);
+        }
         break;
     }
 }
@@ -450,7 +542,9 @@ void Slot::setGlyph(Segment *seg, uint16 glyphid, const GlyphFace * theGlyph)
         if (!aGlyph) aGlyph = theGlyph;
     }
     m_advance = Position(aGlyph->theAdvance().x, 0.);
-    if (seg->silf()->aPassBits())
+    // The pass bits are only ever and-ed into, so once they are all clear
+    // there is nothing left for a glyph to clear.
+    if (seg->passBits() && seg->silf()->aPassBits())
     {
         seg->mergePassBits(uint8(theGlyph->attrs()[seg->silf()->aPassBits()]));
         if (seg->silf()->numPasses() > 16)

@@ -90,10 +90,13 @@ public:
     const BBox &     getSubBoundingBBox(unsigned short glyphid, uint8 subindex) const;
     bool             check(unsigned short glyphid) const;
     bool             hasBoxes() const { return _boxes != 0; }
+    bool             preloaded() const { return _glyph_loader == 0; }
 
     CLASS_NEW_DELETE;
 
 private:
+    const GlyphFace *loadGlyph(unsigned short glyphid) const;
+
     const Rect            _empty_slant_box;
     const Loader        * _glyph_loader;
     const GlyphFace *   * _glyphs;
@@ -125,6 +128,17 @@ inline
 bool GlyphCache::check(unsigned short glyphid) const
 {
     return _boxes && glyphid < _num_glyphs;
+}
+
+inline
+const GlyphFace *GlyphCache::glyph(unsigned short glyphid) const      //result may be changed by subsequent call with a different glyphid
+{
+    if (glyphid >= numGlyphs())
+        return _glyphs[0];
+    const GlyphFace * const p = _glyphs[glyphid];
+    if (p == 0 && _glyph_loader)
+        return loadGlyph(glyphid);
+    return p;
 }
 
 inline

@@ -159,6 +159,15 @@ float Segment::justify(Slot *pSlot, const Font *font, float width, GR_MAYBE_UNUS
         } while (i == 0 && int(std::abs(error)) > 0 && tWeight);
     }
 
+    // From here on the slot list is not what passes get while a segment is
+    // made. first() and last() become the ends of the line, which need not
+    // be the ends of the list, and where addLineEnd() puts a slot before
+    // another it leaves the next of the slot before that as it was, so that
+    // going back from a slot and forward again need not come to that slot.
+    // The passes run on this segment from now on must not count on that:
+    // see Pass::runGraphite().
+    m_flags |= SEG_JUSTIFIED;
+
     Slot *oldFirst = m_first;
     Slot *oldLast = m_last;
     if (silf()->flags() & 1)

@@ -13,8 +13,10 @@ namespace graphite2 {
 
 typedef gr_attrCode attrCode;
 
+class GlyphCache;
 class GlyphFace;
 class Segment;
+class SlotCollision;
 
 struct SlotJustify
 {
@@ -46,6 +48,24 @@ class Slot
 public:
     struct iterator;
 
+    // What finalise() is to do, apart from which slot to start at and where
+    // to put it: everything that is the same for all the slots it visits.
+    struct Positioning
+    {
+        Positioning(const Segment *seg, const Font *font, Rect *bbox, uint8 attrLevel, bool rtl, bool isFinal);
+
+        const Font          * font;         // NULL to position in design units
+        const GlyphCache    * glyphs;
+        const SlotCollision * collisions;   // the segment's collision info if its offsets are to be applied, or NULL
+        Rect                * bbox;         // bounding box to extend, or NULL if none is wanted
+        float                 scale;
+        float                 dirSign;      // -1 for right to left, 1 for left to right
+        float                 clusterMin;   // leftmost origin in the cluster so far
+        uint8                 attrLevel;
+        bool                  rtl;
+        bool                  plain;        // no font, no bbox, no attrLevel: nothing to do but add positions up
+    };
+
     unsigned short gid() const { return m_glyphid; }
     Position origin() const { return m_position; }
     float advance() const { return m_advance.x; }
@@ -74,6 +94,7 @@ public:
     bool isBase() const { return (!m_parent); }
     void update(int numSlots, int numCharInfo, Position &relpos);
     Position finalise(const Segment* seg, const Font* font, Position & base, Rect & bbox, uint8 attrLevel, float & clusterMin, bool rtl, bool isFinal, int depth = 0);
+    static Position finaliseClusters(Positioning & p, Slot * first, const Slot * end, bool backwards);
     bool isDeleted() const { return (m_flags & DELETED) ? true : false; }
     void markDeleted(bool state) { if (state) m_flags |= DELETED; else m_flags &= ~DELETED; }
     bool isCopied() const { return (m_flags & COPIED) ? true : false; }
@@ -115,6 +136,10 @@ public:
     CLASS_NEW_DELETE
 
 private:
+    template <bool PLAIN> const GlyphFace * place(const Positioning & p, Position & shift, float & tAdvance) const;
+    template <bool PLAIN> static Position finaliseBases(Positioning & p, Slot * s, const Slot * end, bool backwards, Position currpos, int depth, bool alone);
+    template <bool PLAIN> float finaliseAttached(Positioning & p, const Position & base, int depth);
+
     Slot *m_next;           // linked list of slots
     Slot *m_prev;
     unsigned short m_glyphid;        // glyph id

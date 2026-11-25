@@ -41,12 +41,6 @@ uint8 Zones::Exclusion::outcode(float val) const {
     return ((p - xm >= d) << 1) | (x - p > d);
 }
 
-void Zones::exclude_with_margins(float xmin, float xmax, int axis) {
-    remove(xmin, xmax);
-    weightedAxis(axis, xmin-_margin_len, xmin, 0, 0, _margin_weight, xmin-_margin_len, 0, 0, false);
-    weightedAxis(axis, xmax, xmax+_margin_len, 0, 0, _margin_weight, xmax+_margin_len, 0, 0, false);
-}
-
 namespace
 {
 
@@ -62,15 +56,9 @@ bool separated(float a, float b) {
 
 }
 
-void Zones::insert(Exclusion e)
+// Insert an exclusion that has been clipped to the zone and is not empty.
+void Zones::insert_clipped(Exclusion & e)
 {
-#if !defined GRAPHITE2_NTRACING
-    addDebug(&e);
-#endif
-    e.x = max(e.x, _pos);
-    e.xm = min(e.xm, _posm);
-    if (e.x >= e.xm) return;
-
     for (iterator i = _exclusions.begin(), ie = _exclusions.end(); i != ie && e.x < e.xm; ++i)
     {
         const uint8 oca = e.outcode(i->x),
@@ -118,15 +106,9 @@ void Zones::insert(Exclusion e)
 }
 
 
-void Zones::remove(float x, float xm)
+// Remove a range that has been clipped to the zone and is not empty.
+void Zones::remove_clipped(float x, float xm)
 {
-#if !defined GRAPHITE2_NTRACING
-    removeDebug(x, xm);
-#endif
-    x = max(x, _pos);
-    xm = min(xm, _posm);
-    if (x >= xm) return;
-
     for (iterator i = _exclusions.begin(), ie = _exclusions.end(); i != ie; ++i)
     {
         const uint8 oca = i->outcode(x),

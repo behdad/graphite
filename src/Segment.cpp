@@ -72,9 +72,7 @@ void Segment::appendSlot(int id, int cid, int gid, int iFeats, size_t coffset)
     aSlot->prev(m_last);
     m_last = aSlot;
     if (!m_first) m_first = aSlot;
-    if (theGlyph && m_silf->aPassBits())
-        m_passBits &= theGlyph->attrs()[m_silf->aPassBits()]
-                    | (m_silf->numPasses() > 16 ? (theGlyph->attrs()[m_silf->aPassBits() + 1] << 16) : 0);
+    // setGlyph has merged the glyph's pass bits into the segment's.
 }
 
 Slot *Segment::newSlot()
@@ -265,8 +263,6 @@ void Segment::linkClusters(Slot *s, Slot * end)
 Position Segment::positionSlots(const Font *font, Slot * iStart, Slot * iEnd, bool isRtl, bool isFinal)
 {
     Position currpos(0., 0.);
-    float clusterMin = 0.;
-    Rect bbox;
     bool reorder = (currdir() != isRtl);
 
     if (reorder)
@@ -283,22 +279,10 @@ Position Segment::positionSlots(const Font *font, Slot * iStart, Slot * iEnd, bo
     if (!iStart || !iEnd)   // only true for empty segments
         return currpos;
 
-    if (isRtl)
-    {
-        for (Slot * s = iEnd, * const end = iStart->prev(); s && s != end; s = s->prev())
-        {
-            if (s->isBase())
-                currpos = s->finalise(this, font, currpos, bbox, 0, clusterMin = currpos.x, isRtl, isFinal);
-        }
-    }
-    else
-    {
-        for (Slot * s = iStart, * const end = iEnd->next(); s && s != end; s = s->next())
-        {
-            if (s->isBase())
-                currpos = s->finalise(this, font, currpos, bbox, 0, clusterMin = currpos.x, isRtl, isFinal);
-        }
-    }
+    // Nobody wants the bounding box of the slots positioned here.
+    Slot::Positioning pos(this, font, NULL, 0, isRtl, isFinal);
+    currpos = isRtl ? Slot::finaliseClusters(pos, iEnd, iStart->prev(), true)
+                    : Slot::finaliseClusters(pos, iStart, iEnd->next(), false);
     if (reorder)
         reverseSlots();
     return currpos;

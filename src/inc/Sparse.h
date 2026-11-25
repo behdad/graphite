@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "inc/Main.h"
+#include "inc/bits.h"
 
 namespace graphite2 {
 
@@ -38,6 +39,12 @@ private:
     sparse & operator = (const sparse &);
 
 public:
+    // Sequential access to the values of a few consecutive keys: constructed
+    // at a key k, each call to next() returns what operator[] would return
+    // for k, k+1, k+2, ... in turn, up to k + reader::MAX_KEYS - 1, without
+    // redoing the chunk lookup and the population count for every key.
+    class reader;
+
     template<typename I>
     sparse(I first, const I last);
     sparse() throw();
@@ -131,6 +138,19 @@ sparse::operator bool () const throw()
 }
 
 inline
+sparse::mapped_type sparse::operator [] (const key_type k) const throw()
+{
+    const unsigned int  n = k/SIZEOF_CHUNK;
+    if (n >= m_nchunks) return 0;       // beyond the last key stored
+
+    const chunk &       c = m_array.map[n];
+    const mask_t        m = c.mask >> (SIZEOF_CHUNK - 1 - (k%SIZEOF_CHUNK));
+    if (!(m & 1))       return 0;       // key not present
+
+    return m_array.values[c.offset + bit_set_count(mask_t(m >> 1))];
+}
+
+inline
 size_t sparse::size() const throw()
 {
     return m_nchunks*SIZEOF_CHUNK;
@@ -140,6 +160,70 @@ inline
 size_t sparse::_sizeof() const throw()
 {
     return sizeof(sparse) + capacity()*sizeof(mapped_type) + m_nchunks*sizeof(chunk);
+}
+
+
+class sparse::reader
+{
+public:
+    // The most keys that can be read. It is the number of keys in a chunk on
+    // the platforms where a chunk is smallest.
+    enum { MAX_KEYS = 16 };
+
+    reader(const sparse & s, const key_type k) throw();
+
+    mapped_type next() throw();
+    // Whether any of the next n keys is present, n being MAX_KEYS at most:
+    // if not, next() returns 0 for every one of them.
+    bool        any(unsigned int n) const throw();
+
+private:
+    const mapped_type * m_value;    // value of the next key that is present
+    mask_t              m_mask;     // which of the keys still to come are present: a
+                                    // chunk mask with the bit of the next key at its top
+};
+
+inline
+sparse::reader::reader(const sparse & s, const key_type k) throw()
+: m_value(0), m_mask(0)
+{
+    const unsigned int n    = k/SIZEOF_CHUNK,   // the chunk k is in
+                       skip = k%SIZEOF_CHUNK;   // the keys of that chunk before k
+
+    // A chunk's worth of keys from k on: the keys of chunk n from k to its
+    // end, then the first skip keys of chunk n+1.
+    if (n < s.m_nchunks)
+    {
+        const chunk & c = s.m_array.map[n];
+        m_mask  = (mask_t(c.mask) << skip) & ((mask_t(1) << SIZEOF_CHUNK) - 1);
+        m_value = s.m_array.values + c.offset
+                    + bit_set_count(mask_t(mask_t(c.mask) >> (SIZEOF_CHUNK - skip)));
+    }
+    if (skip && n + 1 < s.m_nchunks)
+    {
+        const chunk & c = s.m_array.map[n+1];
+        // The values of a chunk follow those of the chunk before it, so the
+        // values of chunk n+1 are found by stepping on from those of chunk n,
+        // unless chunk n has no keys from k on, when it may have no values.
+        if (!m_mask)
+            m_value = s.m_array.values + c.offset;
+        m_mask |= mask_t(c.mask) >> (SIZEOF_CHUNK - skip);
+    }
+}
+
+inline
+sparse::mapped_type sparse::reader::next() throw()
+{
+    const mask_t present = m_mask & (mask_t(1) << (SIZEOF_CHUNK - 1));
+    m_mask <<= 1;
+    return present ? *m_value++ : mapped_type(0);
+}
+
+inline
+bool sparse::reader::any(unsigned int n) const throw()
+{
+    // The next n keys are the top n bits of the mask's SIZEOF_CHUNK.
+    return ((m_mask & ((mask_t(1) << SIZEOF_CHUNK) - 1)) >> (SIZEOF_CHUNK - n)) != 0;
 }
 
 } // namespace graphite2

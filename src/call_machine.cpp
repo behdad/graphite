@@ -31,8 +31,15 @@
                             bool name(registers) {
 #define ENDOP                   return (sp - sb)/Machine::STACK_MAX==0; \
                             }
+#define ENDOP_SAME              return true; \
+                            }
+#define ENDOP_PUSH              return sp < sb + Machine::STACK_MAX; \
+                            }
+#define ENDOP_POP               return sp >= sb; \
+                            }
 
 #define EXIT(status)        { push(status); return false; }
+#define FALLBACK(name)      return name(dp, sp, sb, reg)
 
 // This is required by opcode_table.h
 #define do_(name)           instr(name)
