@@ -130,9 +130,11 @@ private:
       void accumulate_rules(const State &state);
 
   private:
-      RuleEntry * m_begin,
-                * m_end,
-                  m_rules[MAX_RULES*2];
+      void merge(const State &state);
+
+      const RuleEntry * m_begin,
+                      * m_end;
+      RuleEntry         m_rules[MAX_RULES*2];
   };
 
 public:
@@ -197,27 +199,16 @@ void FiniteStateMachine::Rules::accumulate_rules(const State &state)
   // Only bother if there are rules in the State object.
   if (state.empty()) return;
 
-  // Merge the new sorted rules list into the current sorted result set.
-  const RuleEntry * lre = begin(), * rre = state.rules;
-  RuleEntry * out = m_rules + (m_begin == m_rules)*MAX_RULES;
-  const RuleEntry * const lrend = out + MAX_RULES,
-                  * const rrend = state.rules_end;
-  m_begin = out;
-  while (lre != end() && out != lrend)
+  // The first rules found are used where they are: merged with nothing
+  // they would be copied as they are, and a State has at most MAX_RULES.
+  if (m_begin == m_end)
   {
-    if (*lre < *rre)      *out++ = *lre++;
-    else if (*rre < *lre) { *out++ = *rre++; }
-    else                { *out++ = *lre++; ++rre; }
-
-    if (rre == rrend)
-    {
-      while (lre != end() && out != lrend) { *out++ = *lre++; }
-      m_end = out;
-      return;
-    }
+    m_begin = state.rules;
+    m_end   = state.rules_end;
+    return;
   }
-  while (rre != rrend && out != lrend) { *out++ = *rre++; }
-  m_end = out;
+
+  merge(state);
 }
 
 inline

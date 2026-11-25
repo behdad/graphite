@@ -997,6 +997,32 @@ bool Pass::testConstraint(const Rule & r, Machine & m) const
 }
 
 
+void FiniteStateMachine::Rules::merge(const State &state)
+{
+  // Merge the new sorted rules list into the current sorted result set.
+  const RuleEntry * lre = begin(), * rre = state.rules;
+  RuleEntry * out = m_rules + (m_begin == m_rules)*MAX_RULES;
+  const RuleEntry * const lrend = out + MAX_RULES,
+                  * const rrend = state.rules_end;
+  m_begin = out;
+  while (lre != end() && out != lrend)
+  {
+    if (*lre < *rre)      *out++ = *lre++;
+    else if (*rre < *lre) { *out++ = *rre++; }
+    else                { *out++ = *lre++; ++rre; }
+
+    if (rre == rrend)
+    {
+      while (lre != end() && out != lrend) { *out++ = *lre++; }
+      m_end = out;
+      return;
+    }
+  }
+  while (rre != rrend && out != lrend) { *out++ = *rre++; }
+  m_end = out;
+}
+
+
 void SlotMap::collectGarbage(Slot * &aSlot)
 {
     for(Slot **s = begin(), *const *const se = end() - 1; s != se; ++s) {
