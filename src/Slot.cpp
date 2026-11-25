@@ -79,11 +79,12 @@ Slot::Positioning::Positioning(const Segment *seg, const Font *aFont, Rect *aBbo
 Position Slot::finalise(const Segment *seg, const Font *font, Position & base, Rect & bbox, uint8 attrLevel, float & clusterMin, bool rtl, bool isFinal, int depth)
 {
     // With a bbox to fill this is never the plain case. A slot that is not
-    // attached is a run of one for finaliseBases().
+    // attached is done by finaliseBases(), alone: where its links lead is
+    // not looked at, which after Segment::justify() may be to itself.
     Positioning p(seg, font, &bbox, attrLevel, rtl, isFinal);
     p.clusterMin = clusterMin;
     const Position res = m_parent ? Position(finaliseAttached<false>(p, base, depth), 0)
-                                  : finaliseBases<false>(p, this, m_next, false, base, depth);
+                                  : finaliseBases<false>(p, this, NULL, false, base, depth, true);
     clusterMin = p.clusterMin;
     return res;
 }
@@ -93,8 +94,8 @@ Position Slot::finalise(const Segment *seg, const Font *font, Position & base, R
 // and the first at the origin. Returns where the last one ends.
 Position Slot::finaliseClusters(Positioning & p, Slot * first, const Slot * end, bool backwards)
 {
-    return p.plain ? finaliseBases<true>(p, first, end, backwards, Position(0, 0), 0)
-                   : finaliseBases<false>(p, first, end, backwards, Position(0, 0), 0);
+    return p.plain ? finaliseBases<true>(p, first, end, backwards, Position(0, 0), 0, false)
+                   : finaliseBases<false>(p, first, end, backwards, Position(0, 0), 0, false);
 }
 
 // The three functions below are compiled twice. PLAIN is for a Positioning
@@ -133,14 +134,15 @@ const GlyphFace * Slot::place(const Positioning & p, Position & shift, float & t
 }
 
 // finalise() for the slots from s up to end that are not attached to another:
-// each is put where the one before it ended, the first at currpos.
+// each is put where the one before it ended, the first at currpos. With alone
+// it is s and no other slot.
 template <bool PLAIN>
 inline
-Position Slot::finaliseBases(Positioning & p, Slot * s, const Slot * const end, const bool backwards, Position currpos, const int depth)
+Position Slot::finaliseBases(Positioning & p, Slot * s, const Slot * const end, const bool backwards, Position currpos, const int depth, const bool alone)
 {
     const float scale = PLAIN ? 1.0f : p.scale;
 
-    for (; s && s != end; s = backwards ? s->m_prev : s->m_next)
+    for (; s && s != end; s = alone ? NULL : backwards ? s->m_prev : s->m_next)
     {
         if (s->m_parent) continue;
         if (depth > 100 || (!PLAIN && p.attrLevel && s->m_attLevel > p.attrLevel))

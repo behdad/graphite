@@ -137,7 +137,7 @@ public:
 
 private:
     template <bool PLAIN> const GlyphFace * place(const Positioning & p, Position & shift, float & tAdvance) const;
-    template <bool PLAIN> static Position finaliseBases(Positioning & p, Slot * s, const Slot * end, bool backwards, Position currpos, int depth);
+    template <bool PLAIN> static Position finaliseBases(Positioning & p, Slot * s, const Slot * end, bool backwards, Position currpos, int depth, bool alone);
     template <bool PLAIN> float finaliseAttached(Positioning & p, const Position & base, int depth);
 
     Slot *m_next;           // linked list of slots
