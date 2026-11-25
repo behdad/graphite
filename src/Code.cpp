@@ -34,8 +34,7 @@ using namespace vm;
 
 namespace {
 
-inline bool is_return(const instr i) {
-    const opcode_t * opmap = Machine::getOpcodeTable();
+inline bool is_return(const opcode_t * opmap, const instr i) {
     const instr pop_ret  = *opmap[POP_RET].impl,
                 ret_zero = *opmap[RET_ZERO].impl,
                 ret_true = *opmap[RET_TRUE].impl;
@@ -61,7 +60,7 @@ public:
     struct limits;
     static const int NUMCONTEXTS = 256;
 
-    decoder(limits & lims, Code &code, enum passtype pt) throw();
+    decoder(limits & lims, Code &code, enum passtype pt, const opcode_t * op_to_fn) throw();
 
     bool        load(const byte * bc_begin, const byte * bc_end);
     void        apply_analysis(instr * const code, instr * code_end);
@@ -88,6 +87,7 @@ private:
     instr             * _instr;
     byte              * _data;
     limits            & _max;
+    const opcode_t    * _op_to_fn;
     enum passtype       _passtype;
     int                 _stack_depth;
     bool                _in_ctxt_item;
@@ -108,11 +108,11 @@ struct Machine::Code::decoder::limits
   const byte         attrid[gr_slatMax];
 };
 
-inline Machine::Code::decoder::decoder(limits & lims, Code &code, enum passtype pt) throw()
+inline Machine::Code::decoder::decoder(limits & lims, Code &code, enum passtype pt, const opcode_t * op_to_fn) throw()
 : _code(code),
   _out_index(code._constraint ? 0 : lims.pre_context),
   _out_length(code._constraint ? 1 : lims.rule_length),
-  _instr(code._code), _data(code._data), _max(lims), _passtype(pt),
+  _instr(code._code), _data(code._data), _max(lims), _op_to_fn(op_to_fn), _passtype(pt),
   _stack_depth(0),
   _in_ctxt_item(false),
   _slotref(0),
@@ -168,7 +168,7 @@ Machine::Code::Code(bool is_constraint, const byte * bytecode_begin, const byte 
          0,0,0,0,0,0,0, silf.numUser()}
     };
 
-    decoder dec(lims, *this, pt);
+    decoder dec(lims, *this, pt, op_to_fn);
     if(!dec.load(bytecode_begin, bytecode_end))
        return;
 
@@ -181,7 +181,7 @@ Machine::Code::Code(bool is_constraint, const byte * bytecode_begin, const byte 
     }
 
     // When we reach the end check we've terminated it correctly
-    if (!is_return(_code[_instr_count-1])) {
+    if (!is_return(op_to_fn, _code[_instr_count-1])) {
         failure(missing_return);
         return;
     }
@@ -537,8 +537,7 @@ void Machine::Code::decoder::analyse_opcode(const opcode opc, const int8  * arg)
 
 bool Machine::Code::decoder::emit_opcode(opcode opc, const byte * & bc)
 {
-    const opcode_t * op_to_fn = Machine::getOpcodeTable();
-    const opcode_t & op       = op_to_fn[opc];
+    const opcode_t & op       = _op_to_fn[opc];
     if (op.impl[_code._constraint] == 0)
     {
         failure(unimplemented_opcode_used);
@@ -605,7 +604,7 @@ void Machine::Code::decoder::apply_analysis(instr * const code, instr * code_end
     int tempcount = 0;
     if (_code._constraint) return;
 
-    const instr temp_copy = Machine::getOpcodeTable()[TEMP_COPY].impl[0];
+    const instr temp_copy = _op_to_fn[TEMP_COPY].impl[0];
     for (const context * c = _contexts, * const ce = c + _slotref; c < ce; ++c)
     {
         if (!c->flags.referenced || !c->flags.changed) continue;
@@ -630,7 +629,7 @@ bool Machine::Code::decoder::validate_opcode(const byte opc, const byte * const 
         failure(invalid_opcode);
         return false;
     }
-    const opcode_t & op = Machine::getOpcodeTable()[opc];
+    const opcode_t & op = _op_to_fn[opc];
     if (op.impl[_code._constraint] == 0)
     {
         failure(unimplemented_opcode_used);
