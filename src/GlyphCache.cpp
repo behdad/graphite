@@ -196,29 +196,26 @@ GlyphCache::~GlyphCache()
     delete _glyph_loader;
 }
 
-const GlyphFace *GlyphCache::glyph(unsigned short glyphid) const      //result may be changed by subsequent call with a different glyphid
+// The slow path of glyph(): load a glyph that is not in the cache yet.
+// Only reached when the glyphs were not preloaded.
+const GlyphFace *GlyphCache::loadGlyph(unsigned short glyphid) const
 {
-    if (glyphid >= numGlyphs())
-        return _glyphs[0];
     const GlyphFace * & p = _glyphs[glyphid];
-    if (p == 0 && _glyph_loader)
+    int numsubs = 0;
+    GlyphFace * g = new GlyphFace();
+    if (g)  p = _glyph_loader->read_glyph(glyphid, *g, &numsubs);
+    if (!p)
     {
-        int numsubs = 0;
-        GlyphFace * g = new GlyphFace();
-        if (g)  p = _glyph_loader->read_glyph(glyphid, *g, &numsubs);
-        if (!p)
+        delete g;
+        return *_glyphs;
+    }
+    if (_boxes)
+    {
+        _boxes[glyphid] = (GlyphBox *)gralloc<char>(sizeof(GlyphBox) + 8 * numsubs * sizeof(float));
+        if (!_glyph_loader->read_box(glyphid, _boxes[glyphid], *_glyphs[glyphid]))
         {
-            delete g;
-            return *_glyphs;
-        }
-        if (_boxes)
-        {
-            _boxes[glyphid] = (GlyphBox *)gralloc<char>(sizeof(GlyphBox) + 8 * numsubs * sizeof(float));
-            if (!_glyph_loader->read_box(glyphid, _boxes[glyphid], *_glyphs[glyphid]))
-            {
-                free(_boxes[glyphid]);
-                _boxes[glyphid] = 0;
-            }
+            free(_boxes[glyphid]);
+            _boxes[glyphid] = 0;
         }
     }
     return p;
