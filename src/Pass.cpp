@@ -1403,6 +1403,7 @@ bool Pass::collisionKern(Segment *seg, int dir, json * const dbgout) const
     float ymin = 1e38f;
     float ymax = -1e38f;
     const GlyphCache &gc = seg->getFace()->glyphs();
+    KernCollider coll(dbgout);      // one for all the slots, so that its memory is reused
 
     // phase 3 : handle kerning of clusters
 #if !defined GRAPHITE2_NTRACING
@@ -1424,7 +1425,7 @@ bool Pass::collisionKern(Segment *seg, int dir, json * const dbgout) const
         }
         if (start && (c->flags() & (SlotCollision::COLL_KERN | SlotCollision::COLL_FIX))
                         == (SlotCollision::COLL_KERN | SlotCollision::COLL_FIX))
-            resolveKern(seg, s, start, dir, ymin, ymax, dbgout);
+            resolveKern(seg, s, start, coll, dir, ymin, ymax, dbgout);
         if (c->flags() & SlotCollision::COLL_END)
             start = NULL;
         if (c->flags() & SlotCollision::COLL_START)
@@ -1563,7 +1564,7 @@ bool Pass::resolveCollisions(Segment *seg, Slot *slotFix, Slot *start,
     return true;
 }
 
-float Pass::resolveKern(Segment *seg, Slot *slotFix, GR_MAYBE_UNUSED Slot *start, int dir,
+float Pass::resolveKern(Segment *seg, Slot *slotFix, GR_MAYBE_UNUSED Slot *start, KernCollider &coll, int dir,
     float &ymin, float &ymax, json *const dbgout) const
 {
     Slot *nbor; // neighboring slot
@@ -1585,7 +1586,7 @@ float Pass::resolveKern(Segment *seg, Slot *slotFix, GR_MAYBE_UNUSED Slot *start
     }
     bool seenEnd = (cFix->flags() & SlotCollision::COLL_END) != 0;
     bool isInit = false;
-    KernCollider coll(dbgout);
+    coll.reset();
 
     ymax = max(by + bbb.tr.y, ymax);
     ymin = min(by + bbb.bl.y, ymin);
