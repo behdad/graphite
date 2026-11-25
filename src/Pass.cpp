@@ -293,6 +293,29 @@ bool Pass::readRules(const byte * rule_map, const size_t num_entries,
 static int cmpRuleEntry(const void *a, const void *b) { return (*(RuleEntry *)a < *(RuleEntry *)b ? -1 :
                                                                 (*(RuleEntry *)b < *(RuleEntry *)a ? 1 : 0)); }
 
+// Sort the rules of one state. A state seldom has more than a few rules, so
+// sort short lists by insertion, without the calls into qsort and back out
+// to the comparator. Entries only compare equal when they are the same rule,
+// so there is only one sorted order and it does not matter who sorts.
+static void sortRuleEntries(RuleEntry * const begin, RuleEntry * const end)
+{
+    const ptrdiff_t n = end - begin;
+    if (n < 2) return;
+    if (n > 32)
+    {
+        qsort(begin, n, sizeof(RuleEntry), &cmpRuleEntry);
+        return;
+    }
+    for (RuleEntry * i = begin + 1; i != end; ++i)
+    {
+        const RuleEntry e = *i;
+        RuleEntry * j = i;
+        for (; j != begin && e < j[-1]; --j)
+            *j = j[-1];
+        *j = e;
+    }
+}
+
 namespace
 {
 
@@ -397,7 +420,7 @@ bool Pass::readStates(const byte * starts, const byte *states, const byte * o_ru
         s->rules_end = (end - begin <= FiniteStateMachine::MAX_RULES)? end :
             begin + FiniteStateMachine::MAX_RULES;
         if (begin)      // keep UBSan happy can't call qsort with null begin
-            qsort(begin, end - begin, sizeof(RuleEntry), &cmpRuleEntry);
+            sortRuleEntries(begin, end);
     }
 
     return true;
