@@ -293,6 +293,47 @@ bool Pass::readRules(const byte * rule_map, const size_t num_entries,
 static int cmpRuleEntry(const void *a, const void *b) { return (*(RuleEntry *)a < *(RuleEntry *)b ? -1 :
                                                                 (*(RuleEntry *)b < *(RuleEntry *)a ? 1 : 0)); }
 
+namespace
+{
+
+// Convert big endian uint16s at src into native ones at dst, four at a time
+// in a 64 bit word, and test that every one of them is below limit. Returns
+// how many were converted: n rounded down to a multiple of four when all of
+// those are below limit, otherwise 0, in which case nothing has been checked
+// and the caller's own loop must read, test and report from the start.
+size_t read_uint16s_below(uint16 * dst, const byte * src, size_t n, const uint16 limit)
+{
+    typedef unsigned long long word;
+    // The range test below needs every value >= 0x8000 to be out of range.
+    if (limit > 0x8000 || sizeof(word) != 8) return 0;
+
+    const uint16 probe = 1;
+    const bool   little_endian = *reinterpret_cast<const byte *>(&probe) == 1;
+    const word   low_bytes = 0x00FF00FF00FF00FFull,
+                 top_bits  = 0x8000800080008000ull,
+                 bias      = (0x8000u - limit) * 0x0001000100010001ull;
+    word         over = 0;
+
+    n &= ~size_t(3);
+    for (const byte * const src_end = src + n * sizeof(uint16); src != src_end; src += sizeof(word), dst += 4)
+    {
+        word w;
+        memcpy(&w, src, sizeof w);
+        // A big endian host already has each value the right way round.
+        if (little_endian) w = ((w & low_bytes) << 8) | ((w >> 8) & low_bytes);
+        memcpy(dst, &w, sizeof w);
+        // Each 16 bit lane of w now holds one value. A lane with its top bit
+        // set is >= limit as it stands. When no lane has it set adding the
+        // bias cannot carry from one lane into the next, and sets the top
+        // bit of exactly those lanes that are >= limit.
+        over |= w | (w + bias);
+    }
+
+    return over & top_bits ? 0 : n;
+}
+
+} // end namespace
+
 bool Pass::readStates(const byte * starts, const byte *states, const byte * o_rule_map, GR_MAYBE_UNUSED Face & face, Error &e)
 {
 #ifdef GRAPHITE2_TELEMETRY
@@ -322,8 +363,14 @@ bool Pass::readStates(const byte * starts, const byte *states, const byte * o_ru
     }
 
     // load state transition table.
-    for (uint16 * t = m_transitions,
-                * const t_end = t + m_numTransition*m_numColumns; t != t_end; ++t)
+    uint16 * t = m_transitions,
+           * const t_end = t + m_numTransition*m_numColumns;
+    // Do as much of the table as possible the fast way. If that finds a bad
+    // state it reports nothing done and the loop below finds the culprit.
+    const size_t num_loaded = read_uint16s_below(t, states, t_end - t, m_numStates);
+    t += num_loaded;
+    be::skip<uint16>(states, num_loaded);
+    for (; t != t_end; ++t)
     {
         *t = be::read<uint16>(states);
         if (e.test(*t >= m_numStates, E_BADSTATE))
