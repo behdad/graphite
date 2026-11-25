@@ -72,10 +72,7 @@ void Segment::appendSlot(int id, int cid, int gid, int iFeats, size_t coffset)
     aSlot->prev(m_last);
     m_last = aSlot;
     if (!m_first) m_first = aSlot;
-    // nothing to clear once the pass bits are all clear (see Slot::setGlyph)
-    if (theGlyph && m_passBits && m_silf->aPassBits())
-        m_passBits &= theGlyph->attrs()[m_silf->aPassBits()]
-                    | (m_silf->numPasses() > 16 ? (theGlyph->attrs()[m_silf->aPassBits() + 1] << 16) : 0);
+    // setGlyph has merged the glyph's pass bits into the segment's.
 }
 
 Slot *Segment::newSlot()
