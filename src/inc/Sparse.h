@@ -138,6 +138,19 @@ sparse::operator bool () const throw()
 }
 
 inline
+sparse::mapped_type sparse::operator [] (const key_type k) const throw()
+{
+    const unsigned int  n = k/SIZEOF_CHUNK;
+    if (n >= m_nchunks) return 0;       // beyond the last key stored
+
+    const chunk &       c = m_array.map[n];
+    const mask_t        m = c.mask >> (SIZEOF_CHUNK - 1 - (k%SIZEOF_CHUNK));
+    if (!(m & 1))       return 0;       // key not present
+
+    return m_array.values[c.offset + bit_set_count(mask_t(m >> 1))];
+}
+
+inline
 size_t sparse::size() const throw()
 {
     return m_nchunks*SIZEOF_CHUNK;
