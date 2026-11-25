@@ -55,7 +55,7 @@ public:
         Positioning(const Segment *seg, const Font *font, Rect *bbox, uint8 attrLevel, bool rtl, bool isFinal);
 
         const Font          * font;         // NULL to position in design units
-        const GlyphCache    * glyphs;       // NULL when there is neither a font nor a bbox: nothing to scale or measure
+        const GlyphCache    * glyphs;
         const SlotCollision * collisions;   // the segment's collision info if its offsets are to be applied, or NULL
         Rect                * bbox;         // bounding box to extend, or NULL if none is wanted
         float                 scale;
@@ -63,6 +63,7 @@ public:
         float                 clusterMin;   // leftmost origin in the cluster so far
         uint8                 attrLevel;
         bool                  rtl;
+        bool                  plain;        // no font, no bbox, no attrLevel: nothing to do but add positions up
     };
 
     unsigned short gid() const { return m_glyphid; }
@@ -135,8 +136,9 @@ public:
     CLASS_NEW_DELETE
 
 private:
-    const GlyphFace * place(const Positioning & p, Position & shift, float & tAdvance) const;
-    float finaliseAttached(Positioning & p, const Position & base, int depth);
+    template <bool PLAIN> const GlyphFace * place(const Positioning & p, Position & shift, float & tAdvance) const;
+    template <bool PLAIN> Position finaliseBase(Positioning & p, const Position & base, int depth);
+    template <bool PLAIN> float finaliseAttached(Positioning & p, const Position & base, int depth);
 
     Slot *m_next;           // linked list of slots
     Slot *m_prev;

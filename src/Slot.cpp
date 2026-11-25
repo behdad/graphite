@@ -64,14 +64,15 @@ void Slot::update(int /*numGrSlots*/, int numCharInfo, Position &relpos)
 
 Slot::Positioning::Positioning(const Segment *seg, const Font *aFont, Rect *aBbox, uint8 aAttrLevel, bool isRtl, bool isFinal)
 : font(aFont),
-  glyphs(aBbox || aFont ? &seg->getFace()->glyphs() : NULL),
+  glyphs(&seg->getFace()->glyphs()),
   collisions(isFinal ? seg->collisions() : NULL),
   bbox(aBbox),
   scale(aFont ? aFont->scale() : 1.0f),
   dirSign(isRtl * -2 + 1),
   clusterMin(0),
   attrLevel(aAttrLevel),
-  rtl(isRtl)
+  rtl(isRtl),
+  plain(!aFont && !aBbox && !aAttrLevel)
 {
 }
 
@@ -84,9 +85,23 @@ Position Slot::finalise(const Segment *seg, const Font *font, Position & base, R
     return res;
 }
 
+Position Slot::finalise(Positioning & p, const Position & base, int depth)
+{
+    if (p.plain)
+        return m_parent ? Position(finaliseAttached<true>(p, base, depth), 0) : finaliseBase<true>(p, base, depth);
+    return m_parent ? Position(finaliseAttached<false>(p, base, depth), 0) : finaliseBase<false>(p, base, depth);
+}
+
+// The three functions below are compiled twice. PLAIN is for a Positioning
+// that is plain: with no font there is nothing to scale or hint, with no bbox
+// nothing to measure, and with no attachment level no slot to leave out, so
+// the glyph is not needed and the scale is 1. That is how the passes position
+// slots. The other version does everything.
+
 // How far this slot is moved from where it would otherwise go, and how far
-// it advances, in the units of the font. Returns the glyph's metrics, or NULL
-// if nothing needs them.
+// it advances, in the units of the font. Returns the glyph's metrics, unless
+// PLAIN.
+template <bool PLAIN>
 inline
 const GlyphFace * Slot::place(const Positioning & p, Position & shift, float & tAdvance) const
 {
@@ -98,7 +113,7 @@ const GlyphFace * Slot::place(const Positioning & p, Position & shift, float & t
         if (!(coll.flags() & SlotCollision::COLL_KERN) || p.rtl)
             shift = shift + coll.offset();
     }
-    if (!p.glyphs)
+    if (PLAIN)
         return NULL;
     const GlyphFace * glyphFace = p.glyphs->glyphSafe(glyph());
     if (p.font)
@@ -112,29 +127,30 @@ const GlyphFace * Slot::place(const Positioning & p, Position & shift, float & t
     return glyphFace;
 }
 
-Position Slot::finalise(Positioning & p, const Position & base, int depth)
+// finalise() for a slot that is not attached to another.
+template <bool PLAIN>
+Position Slot::finaliseBase(Positioning & p, const Position & base, int depth)
 {
-    if (m_parent)
-        return Position(finaliseAttached(p, base, depth), 0);
-    if (depth > 100 || (p.attrLevel && m_attLevel > p.attrLevel)) return Position(0, 0);
+    if (depth > 100 || (!PLAIN && p.attrLevel && m_attLevel > p.attrLevel)) return Position(0, 0);
+    const float scale = PLAIN ? 1.0f : p.scale;
 
     Position shift;
     float tAdvance;
-    const GlyphFace * glyphFace = place(p, shift, tAdvance);
+    const GlyphFace * glyphFace = place<PLAIN>(p, shift, tAdvance);
 
     m_position = base + shift;
-    Position res = base + Position(tAdvance, m_advance.y * p.scale);
+    Position res = base + Position(tAdvance, m_advance.y * scale);
     p.clusterMin = m_position.x;
 
-    if (glyphFace && p.bbox)
+    if (!PLAIN && glyphFace && p.bbox)
     {
-        Rect ourBbox = glyphFace->theBBox() * p.scale + m_position;
+        Rect ourBbox = glyphFace->theBBox() * scale + m_position;
         *p.bbox = p.bbox->widen(ourBbox);
     }
 
     if (m_child && m_child != this && m_child->attachedTo() == this)
     {
-        const float tRes = m_child->finaliseAttached(p, m_position, depth + 1);
+        const float tRes = m_child->finaliseAttached<PLAIN>(p, m_position, depth + 1);
         if (tRes > res.x) res = Position(tRes, 0);
     }
 
@@ -151,35 +167,37 @@ Position Slot::finalise(Positioning & p, const Position & base, int depth)
 // finalise() for a slot that is attached to another. All the slots finalise()
 // goes on to from the one it is given are, and what such a slot returns always
 // has a y of zero, so only the x is returned.
+template <bool PLAIN>
 float Slot::finaliseAttached(Positioning & p, const Position & base, int depth)
 {
-    if (depth > 100 || (p.attrLevel && m_attLevel > p.attrLevel)) return 0.f;
+    if (depth > 100 || (!PLAIN && p.attrLevel && m_attLevel > p.attrLevel)) return 0.f;
+    const float scale = PLAIN ? 1.0f : p.scale;
 
     Position shift;
     float tAdvance;
-    const GlyphFace * glyphFace = place(p, shift, tAdvance);
+    const GlyphFace * glyphFace = place<PLAIN>(p, shift, tAdvance);
 
     m_position = base + shift;
-    m_position += (m_attach - m_with) * p.scale;
+    m_position += (m_attach - m_with) * scale;
     const bool advances = m_advance.x >= 0.5f;
     float res = advances ? m_position.x + tAdvance - shift.x : 0.f;
     if ((advances || m_position.x < 0) && m_position.x < p.clusterMin) p.clusterMin = m_position.x;
 
-    if (glyphFace && p.bbox)
+    if (!PLAIN && glyphFace && p.bbox)
     {
-        Rect ourBbox = glyphFace->theBBox() * p.scale + m_position;
+        Rect ourBbox = glyphFace->theBBox() * scale + m_position;
         *p.bbox = p.bbox->widen(ourBbox);
     }
 
     if (m_child && m_child != this && m_child->attachedTo() == this)
     {
-        const float tRes = m_child->finaliseAttached(p, m_position, depth + 1);
+        const float tRes = m_child->finaliseAttached<PLAIN>(p, m_position, depth + 1);
         if (advances && tRes > res) res = tRes;
     }
 
     if (m_sibling && m_sibling != this && m_sibling->attachedTo() == m_parent)
     {
-        const float tRes = m_sibling->finaliseAttached(p, base, depth + 1);
+        const float tRes = m_sibling->finaliseAttached<PLAIN>(p, base, depth + 1);
         if (tRes > res) res = tRes;
     }
     return res;
