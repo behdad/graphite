@@ -1068,38 +1068,48 @@ bool KernCollider::initSlot(Segment *seg, Slot *aSlot, const Rect &limit, float 
         int smax = min(numSlices - 1, int((bs.ya + toffset) / _sliceWidth + 1));
         GlyphEdge edge;         // set when the first slice needs it
         bool haveEdge = false;
-        for (int i = smin; i <= smax; ++i)
+        float * const edges = _edges.begin();
+        const float sliceWidth = _sliceWidth;
+        const float ybase = _miny - 1;      // the vertical center of slice i is ybase + (i + .5f) * sliceWidth
+        if (dir & 1)
         {
-            float t;
-            float y = _miny - 1 + (i + .5f) * _sliceWidth; // vertical center of slice
-            if ((dir & 1) && x < _edges[i])
+            for (int i = smin; i <= smax; ++i)
             {
-                if (!haveEdge)
+                if (x < edges[i])
                 {
-                    edge.set(gc, s, c->shift(), margin, false);
-                    haveEdge = true;
-                }
-                t = edge.at(y, _sliceWidth);
-                if (t < _edges[i])
-                {
-                    _edges[i] = t;
-                    if (t < _xbound)
-                        _xbound = t;
+                    if (!haveEdge)
+                    {
+                        edge.set(gc, s, c->shift(), margin, false);
+                        haveEdge = true;
+                    }
+                    const float t = edge.at(ybase + (i + .5f) * sliceWidth, sliceWidth);
+                    if (t < edges[i])
+                    {
+                        edges[i] = t;
+                        if (t < _xbound)
+                            _xbound = t;
+                    }
                 }
             }
-            else if (!(dir & 1) && x > _edges[i])
+        }
+        else
+        {
+            for (int i = smin; i <= smax; ++i)
             {
-                if (!haveEdge)
+                if (x > edges[i])
                 {
-                    edge.set(gc, s, c->shift(), margin, true);
-                    haveEdge = true;
-                }
-                t = edge.at(y, _sliceWidth);
-                if (t > _edges[i])
-                {
-                    _edges[i] = t;
-                    if (t > _xbound)
-                        _xbound = t;
+                    if (!haveEdge)
+                    {
+                        edge.set(gc, s, c->shift(), margin, true);
+                        haveEdge = true;
+                    }
+                    const float t = edge.at(ybase + (i + .5f) * sliceWidth, sliceWidth);
+                    if (t > edges[i])
+                    {
+                        edges[i] = t;
+                        if (t > _xbound)
+                            _xbound = t;
+                    }
                 }
             }
         }
@@ -1138,30 +1148,36 @@ bool KernCollider::mergeSlot(Segment *seg, Slot *slot, const Position &currShift
     bool nooverlap = true;
     GlyphEdge edge;             // set when the first slice needs it
     bool haveEdge = false;
+    // Kept in locals over the loop, which changes none of them but mingap.
+    const float * const edges = _edges.begin();
+    const float sliceWidth = _sliceWidth;
+    const float ybase = _miny - 1;      // the vertical center of slice i is ybase + (i + .5f) * sliceWidth
+    const bool hit = _hit;
+    float mingap = _mingap;
 
     for (int i = smin; i <= smax; ++i)
     {
-        float here = _edges[i] * rtl;
+        float here = edges[i] * rtl;
         if (here > (float)9e37)
             continue;
-        if (!_hit || x > here - _mingap - currSpace)
+        if (!hit || x > here - mingap - currSpace)
         {
-            float y = (float)(_miny - 1 + (i + .5f) * _sliceWidth);  // vertical center of slice
+            float y = (float)(ybase + (i + .5f) * sliceWidth);  // vertical center of slice
             if (!haveEdge)
             {
                 edge.set(seg->getFace()->glyphs(), slot, currShift, 0., rtl > 0);
                 haveEdge = true;
             }
             // 2 * currSpace to account for the space that is already separating them and the space we want to add
-            float m = edge.at(y, _sliceWidth) * rtl + 2 * currSpace;
+            float m = edge.at(y, sliceWidth) * rtl + 2 * currSpace;
             if (m < (float)-8e37)       // only true if the glyph has a gap in it
                 continue;
             nooverlap = false;
             float t = here - m;
-            // _mingap is positive to shrink
-            if (t < _mingap || (!_hit && !collides))
+            // mingap is positive to shrink
+            if (t < mingap || (!hit && !collides))
             {
-                _mingap = t;
+                mingap = t;
                 collides = true;
             }
 #if !defined GRAPHITE2_NTRACING
@@ -1176,6 +1192,7 @@ bool KernCollider::mergeSlot(Segment *seg, Slot *slot, const Position &currShift
         else
             nooverlap = false;
     }
+    _mingap = mingap;
     if (nooverlap)
         _mingap = max(_mingap, _xbound - rtl * (currSpace + _margin + x));
     if (collides && !nooverlap)
