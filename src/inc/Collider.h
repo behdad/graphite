@@ -6,6 +6,7 @@
 #include "inc/List.h"
 #include "inc/Position.h"
 #include "inc/Intervals.h"
+#include "inc/GlyphCache.h"
 #include "inc/debug.h"
 
 namespace graphite2 {
@@ -94,9 +95,6 @@ private:
 
 };  // end of class SlotColllision
 
-struct BBox;
-struct SlantBox;
-
 class ShiftCollider
 {
 public:
@@ -141,6 +139,21 @@ protected:
     uint16  _seqClass;
 	uint16	_seqProxClass;
     uint16  _seqOrder;
+
+    // What mergeSlot needs to know about the target, whichever slot it is
+    // merging. Set by initSlot.
+    BBox     _tbb;      // the target glyph's bounding box
+    SlantBox _tsb;      //   and its slant box
+    float   _tx, _ty;   // _currOffset + _currShift
+    float   _td, _ts;   // _tx - _ty and _tx + _ty
+    // and for each of the four directions of movement:
+    float   _otmin[4];  // the target's extent across the direction
+    float   _otmax[4];
+    float   _lmargin[4];// _margin, measured in the units of the direction
+    float   _otlo[4];   // _otmin - _lmargin
+    float   _othi[4];   // _otmax + _lmargin
+    float   _clo[4];    // the least the target may move, less _lmargin
+    float   _chi[4];    // the most the target may move plus its length, plus _lmargin
 
 	//bool _scraping[4];
 

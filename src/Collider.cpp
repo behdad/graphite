@@ -100,6 +100,63 @@ bool ShiftCollider::initSlot(Segment *seg, Slot *aSlot, const Rect &limit, float
     _seqClass = c->seqClass();
 	_seqProxClass = c->seqProxClass();
     _seqOrder = c->seqOrder();
+
+    // The target's side of the tests that mergeSlot makes on every slot it is
+    // given: worked out here, once, since none of it depends on the other slot.
+    _tbb = bb;
+    _tsb = sb;
+    _tx = _currOffset.x + _currShift.x;
+    _ty = _currOffset.y + _currShift.y;
+    _td = _tx - _ty;
+    _ts = _tx + _ty;
+    for (i = 0; i < 4; ++i)
+    {
+        float otmin, otmax;     // extent of the target across the axis
+        float cmin, cmax;       // target limits along the axis
+        float torg;
+        float lmargin;
+        switch (i) {
+            case 0 :	// x direction
+                otmin = bb.yi + _ty;
+                otmax = bb.ya + _ty;
+                torg = _currOffset.x;
+                cmin = _limit.bl.x + torg;
+                cmax = _limit.tr.x - bb.xi + bb.xa + torg;
+                lmargin = _margin;
+                break;
+            case 1 :	// y direction
+                otmin = bb.xi + _tx;
+                otmax = bb.xa + _tx;
+                torg = _currOffset.y;
+                cmin = _limit.bl.y + torg;
+                cmax = _limit.tr.y - bb.yi + bb.ya + torg;
+                lmargin = _margin;
+                break;
+            case 2 :    // sum
+                otmin = sb.di + _td;
+                otmax = sb.da + _td;
+                torg = _currOffset.x + _currOffset.y;
+                cmin = _limit.bl.x + _limit.bl.y + torg;
+                cmax = _limit.tr.x + _limit.tr.y - sb.si + sb.sa + torg;
+                lmargin = _margin / ISQRT2;
+                break;
+            default :   // diff
+                otmin = sb.si + _ts;
+                otmax = sb.sa + _ts;
+                torg = _currOffset.x - _currOffset.y;
+                cmin = _limit.bl.x - _limit.tr.y + torg;
+                cmax = _limit.tr.x - _limit.bl.y - sb.di + sb.da + torg;
+                lmargin = _margin / ISQRT2;
+                break;
+        }
+        _otmin[i] = otmin;
+        _otmax[i] = otmax;
+        _lmargin[i] = lmargin;
+        _otlo[i] = otmin - lmargin;
+        _othi[i] = otmax + lmargin;
+        _clo[i] = cmin - lmargin;
+        _chi[i] = cmax + lmargin;
+    }
     return true;
 }
 
@@ -250,9 +307,7 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
     const float sd = sx - sy;
     const float ss = sx + sy;
     float vmin, vmax;
-    float omin, omax, otmin, otmax;
-    float cmin, cmax;   // target limits
-    float torg;
+    float omin, omax;
     const GlyphCache &gc = seg->getFace()->glyphs();
     const unsigned short gid = slot->gid();
     if (!gc.check(gid))
@@ -272,18 +327,17 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
                     || (sy + bb.ya + _margin >= _limit.bl.y && sy + bb.yi - _margin <= _limit.tr.y))
 
     {
-        const float tx = _currOffset.x + _currShift.x;
-        const float ty = _currOffset.y + _currShift.y;
-        const float td = tx - ty;
-        const float ts = tx + ty;
+        // What depends on the target alone was worked out by initSlot.
+        const float tx = _tx;
+        const float ty = _ty;
+        const float td = _td;
+        const float ts = _ts;
         const SlantBox &sb = gc.getBoundingSlantBox(gid);
-        const unsigned short tgid = _target->gid();
-        const BBox &tbb = gc.getBoundingBBox(tgid);
-        const SlantBox &tsb = gc.getBoundingSlantBox(tgid);
+        const BBox &tbb = _tbb;
+        const SlantBox &tsb = _tsb;
         float seq_above_wt = cslot->seqAboveWt();
         float seq_below_wt = cslot->seqBelowWt();
         float seq_valign_wt = cslot->seqValignWt();
-        float lmargin;
         // if isAfter, invert orderFlags for diagonal orders.
         if (isAfter)
         {
@@ -301,60 +355,18 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
         // Process main bounding octabox.
         for (int i = 0; i < 4; ++i)
         {
-            switch (i) {
-                case 0 :	// x direction
-                    vmin = max(max(bb.xi - tbb.xa + sx, sb.di - tsb.da + ty + sd), sb.si - tsb.sa - ty + ss);
-                    vmax = min(min(bb.xa - tbb.xi + sx, sb.da - tsb.di + ty + sd), sb.sa - tsb.si - ty + ss);
-                    otmin = tbb.yi + ty;
-                    otmax = tbb.ya + ty;
-                    omin = bb.yi + sy;
-                    omax = bb.ya + sy;
-                    torg = _currOffset.x;
-                    cmin = _limit.bl.x + torg;
-                    cmax = _limit.tr.x - tbb.xi + tbb.xa + torg;
-                    lmargin = _margin;
-                    break;
-                case 1 :	// y direction
-                    vmin = max(max(bb.yi - tbb.ya + sy, tsb.di - sb.da + tx - sd), sb.si - tsb.sa - tx + ss);
-                    vmax = min(min(bb.ya - tbb.yi + sy, tsb.da - sb.di + tx - sd), sb.sa - tsb.si - tx + ss);
-                    otmin = tbb.xi + tx;
-                    otmax = tbb.xa + tx;
-                    omin = bb.xi + sx;
-                    omax = bb.xa + sx;
-                    torg = _currOffset.y;
-                    cmin = _limit.bl.y + torg;
-                    cmax = _limit.tr.y - tbb.yi + tbb.ya + torg;
-                    lmargin = _margin;
-                    break;
-                case 2 :    // sum - moving along the positively-sloped vector, so the boundaries are the
-                            // negatively-sloped boundaries.
-                    vmin = max(max(sb.si - tsb.sa + ss, 2 * (bb.yi - tbb.ya + sy) + td), 2 * (bb.xi - tbb.xa + sx) - td);
-                    vmax = min(min(sb.sa - tsb.si + ss, 2 * (bb.ya - tbb.yi + sy) + td), 2 * (bb.xa - tbb.xi + sx) - td);
-                    otmin = tsb.di + td;
-                    otmax = tsb.da + td;
-                    omin = sb.di + sd;
-                    omax = sb.da + sd;
-                    torg = _currOffset.x + _currOffset.y;
-                    cmin = _limit.bl.x + _limit.bl.y + torg;
-                    cmax = _limit.tr.x + _limit.tr.y - tsb.si + tsb.sa + torg;
-                    lmargin = _margin / ISQRT2;
-                    break;
-                case 3 :    // diff - moving along the negatively-sloped vector, so the boundaries are the
-                            // positively-sloped boundaries.
-                    vmin = max(max(sb.di - tsb.da + sd, 2 * (bb.xi - tbb.xa + sx) - ts), -2 * (bb.ya - tbb.yi + sy) + ts);
-                    vmax = min(min(sb.da - tsb.di + sd, 2 * (bb.xa - tbb.xi + sx) - ts), -2 * (bb.yi - tbb.ya + sy) + ts);
-                    otmin = tsb.si + ts;
-                    otmax = tsb.sa + ts;
-                    omin = sb.si + ss;
-                    omax = sb.sa + ss;
-                    torg = _currOffset.x - _currOffset.y;
-                    cmin = _limit.bl.x - _limit.tr.y + torg;
-                    cmax = _limit.tr.x - _limit.bl.y - tsb.di + tsb.da + torg;
-                    lmargin = _margin / ISQRT2;
-                    break;
-                default :
-                    continue;
-            }
+            // For this axis: the target's extent across it (otmin, otmax),
+            // the margin measured along it, and the two ranges a box is
+            // tested against, each widened by that margin: the target's
+            // extent across the axis (otlo, othi) and the range of
+            // movement along it (clo, chi).
+            const float otmin = _otmin[i];
+            const float otmax = _otmax[i];
+            const float lmargin = _lmargin[i];
+            const float otlo = _otlo[i];
+            const float othi = _othi[i];
+            const float clo = _clo[i];
+            const float chi = _chi[i];
 
 #if !defined GRAPHITE2_NTRACING
             if (dbgout)
@@ -452,7 +464,48 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
                 }
             }
 
-            if (vmax < cmin - lmargin || vmin > cmax + lmargin || omax < otmin - lmargin || omin > otmax + lmargin)
+            // The slot matters on this axis only if it comes within the
+            // margin of the target across the axis (omin, omax) and the
+            // shifts along the axis at which the two would overlap (vmin,
+            // vmax) come within the margin of where the target may go. The
+            // first is the cheaper to find out.
+            switch (i) {
+                case 0 :	// x direction
+                    omin = bb.yi + sy;
+                    omax = bb.ya + sy;
+                    if (omax < otlo || omin > othi)
+                        continue;
+                    vmin = max(max(bb.xi - tbb.xa + sx, sb.di - tsb.da + ty + sd), sb.si - tsb.sa - ty + ss);
+                    vmax = min(min(bb.xa - tbb.xi + sx, sb.da - tsb.di + ty + sd), sb.sa - tsb.si - ty + ss);
+                    break;
+                case 1 :	// y direction
+                    omin = bb.xi + sx;
+                    omax = bb.xa + sx;
+                    if (omax < otlo || omin > othi)
+                        continue;
+                    vmin = max(max(bb.yi - tbb.ya + sy, tsb.di - sb.da + tx - sd), sb.si - tsb.sa - tx + ss);
+                    vmax = min(min(bb.ya - tbb.yi + sy, tsb.da - sb.di + tx - sd), sb.sa - tsb.si - tx + ss);
+                    break;
+                case 2 :    // sum - moving along the positively-sloped vector, so the boundaries are the
+                            // negatively-sloped boundaries.
+                    omin = sb.di + sd;
+                    omax = sb.da + sd;
+                    if (omax < otlo || omin > othi)
+                        continue;
+                    vmin = max(max(sb.si - tsb.sa + ss, 2 * (bb.yi - tbb.ya + sy) + td), 2 * (bb.xi - tbb.xa + sx) - td);
+                    vmax = min(min(sb.sa - tsb.si + ss, 2 * (bb.ya - tbb.yi + sy) + td), 2 * (bb.xa - tbb.xi + sx) - td);
+                    break;
+                default :   // diff - moving along the negatively-sloped vector, so the boundaries are the
+                            // positively-sloped boundaries.
+                    omin = sb.si + ss;
+                    omax = sb.sa + ss;
+                    if (omax < otlo || omin > othi)
+                        continue;
+                    vmin = max(max(sb.di - tsb.da + sd, 2 * (bb.xi - tbb.xa + sx) - ts), -2 * (bb.ya - tbb.yi + sy) + ts);
+                    vmax = min(min(sb.da - tsb.di + sd, 2 * (bb.xa - tbb.xi + sx) - ts), -2 * (bb.yi - tbb.ya + sy) + ts);
+                    break;
+            }
+            if (vmax < clo || vmin > chi)
                 continue;
 
             // Process sub-boxes that are defined for this glyph.
@@ -467,31 +520,39 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
                     const SlantBox &ssb = gc.getSubBoundingSlantBox(gid, j);
                     switch (i) {
                         case 0 :    // x
-                            vmin = max(max(sbb.xi-tbb.xa+sx, ssb.di-tsb.da+sd+ty), ssb.si-tsb.sa+ss-ty);
-                            vmax = min(min(sbb.xa-tbb.xi+sx, ssb.da-tsb.di+sd+ty), ssb.sa-tsb.si+ss-ty);
                             omin = sbb.yi + sy;
                             omax = sbb.ya + sy;
+                            if (omax < otlo || omin > othi)
+                                continue;
+                            vmin = max(max(sbb.xi-tbb.xa+sx, ssb.di-tsb.da+sd+ty), ssb.si-tsb.sa+ss-ty);
+                            vmax = min(min(sbb.xa-tbb.xi+sx, ssb.da-tsb.di+sd+ty), ssb.sa-tsb.si+ss-ty);
                             break;
                         case 1 :    // y
-                            vmin = max(max(sbb.yi-tbb.ya+sy, tsb.di-ssb.da-sd+tx), ssb.si-tsb.sa+ss-tx);
-                            vmax = min(min(sbb.ya-tbb.yi+sy, tsb.da-ssb.di-sd+tx), ssb.sa-tsb.si+ss-tx);
                             omin = sbb.xi + sx;
                             omax = sbb.xa + sx;
+                            if (omax < otlo || omin > othi)
+                                continue;
+                            vmin = max(max(sbb.yi-tbb.ya+sy, tsb.di-ssb.da-sd+tx), ssb.si-tsb.sa+ss-tx);
+                            vmax = min(min(sbb.ya-tbb.yi+sy, tsb.da-ssb.di-sd+tx), ssb.sa-tsb.si+ss-tx);
                             break;
                         case 2 :    // sum
-                            vmin = max(max(ssb.si-tsb.sa+ss, 2*(sbb.yi-tbb.ya+sy)+td), 2*(sbb.xi-tbb.xa+sx)-td);
-                            vmax = min(min(ssb.sa-tsb.si+ss, 2*(sbb.ya-tbb.yi+sy)+td), 2*(sbb.xa-tbb.xi+sx)-td);
                             omin = ssb.di + sd;
                             omax = ssb.da + sd;
+                            if (omax < otlo || omin > othi)
+                                continue;
+                            vmin = max(max(ssb.si-tsb.sa+ss, 2*(sbb.yi-tbb.ya+sy)+td), 2*(sbb.xi-tbb.xa+sx)-td);
+                            vmax = min(min(ssb.sa-tsb.si+ss, 2*(sbb.ya-tbb.yi+sy)+td), 2*(sbb.xa-tbb.xi+sx)-td);
                             break;
-                        case 3 :    // diff
-                            vmin = max(max(ssb.di-tsb.da+sd, 2*(sbb.xi-tbb.xa+sx)-ts), -2*(sbb.ya-tbb.yi+sy)+ts);
-                            vmax = min(min(ssb.da-tsb.di+sd, 2*(sbb.xa-tbb.xi+sx)-ts), -2*(sbb.yi-tbb.ya+sy)+ts);
+                        default :   // diff
                             omin = ssb.si + ss;
                             omax = ssb.sa + ss;
+                            if (omax < otlo || omin > othi)
+                                continue;
+                            vmin = max(max(ssb.di-tsb.da+sd, 2*(sbb.xi-tbb.xa+sx)-ts), -2*(sbb.ya-tbb.yi+sy)+ts);
+                            vmax = min(min(ssb.da-tsb.di+sd, 2*(sbb.xa-tbb.xi+sx)-ts), -2*(sbb.yi-tbb.ya+sy)+ts);
                             break;
                     }
-                    if (vmax < cmin - lmargin || vmin > cmax + lmargin || omax < otmin - lmargin || omin > otmax + lmargin)
+                    if (vmax < clo || vmin > chi)
                         continue;
 
 #if !defined GRAPHITE2_NTRACING
