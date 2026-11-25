@@ -749,21 +749,35 @@ bool Pass::runGraphite(vm::Machine & m, FiniteStateMachine & fsm, bool reverse) 
 
         m.slotMap().highwater(currHigh);
         int lc = m_iMaxLoop;
+        bool match = couldMatch(s);
         do
         {
-            // Without a rule to test, all findNDoRule does is to move on.
-            if (couldMatch(s))
+            // Without a rule to test, all findNDoRule does is to move on,
+            // and only a rule can change the machine's status.
+            if (match)
+            {
                 findNDoRule(s, m, fsm);
+                if (m.status() != Machine::finished) return false;
+            }
             else
                 s = s->next();
-            if (m.status() != Machine::finished) return false;
             if (s && (s == m.slotMap().highwater() || m.slotMap().highpassed() || --lc == 0)) {
                 if (!lc)
                     s = m.slotMap().highwater();
                 lc = m_iMaxLoop;
                 if (s)
+                {
+                    // With the high water mark put after s, as it is about
+                    // to be, each slot that nothing can match takes one turn
+                    // of this loop that moves s on by one and comes back to
+                    // this point. Take those turns here.
+                    while (!(match = couldMatch(s)) && s->next())
+                        s = s->next();
                     m.slotMap().highwater(s->next());
+                    continue;
+                }
             }
+            if (s) match = couldMatch(s);
         } while (s);
     }
     //TODO: Use enums for flags
