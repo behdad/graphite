@@ -319,6 +319,18 @@ static void sortRuleEntries(RuleEntry * const begin, RuleEntry * const end)
 namespace
 {
 
+// Whether read_uint16s_below() steps over the words that are zero. Where
+// every operation is paid for one at a time, as in a WebAssembly interpreter,
+// that is the cheaper way; where the plain loop gets vectorised it is not.
+// Define it to 1 to have it in any build.
+#if !defined(GRAPHITE2_SKIP_ZERO_TRANSITIONS)
+#if defined(__wasm__) && !defined(__wasm_simd128__)
+#define GRAPHITE2_SKIP_ZERO_TRANSITIONS 1
+#else
+#define GRAPHITE2_SKIP_ZERO_TRANSITIONS 0
+#endif
+#endif
+
 // Convert big endian uint16s at src into native ones at dst, four at a time
 // in a 64 bit word, and test that every one of them is below limit. Returns
 // how many were converted: n rounded down to a multiple of four when all of
@@ -343,7 +355,30 @@ size_t read_uint16s_below(uint16 * dst, const byte * src, size_t n, const uint16
     word         over = 0;
 
     n &= ~size_t(3);
-    for (const byte * const src_end = src + n * sizeof(uint16); src != src_end; src += sizeof(word), dst += 4)
+    const byte * const src_end = src + n * sizeof(uint16);
+#if GRAPHITE2_SKIP_ZERO_TRANSITIONS
+    // About half the words of a transition table are zero: four transitions
+    // to state 0, which ends a run. Zero is its own byte swap and is below
+    // any limit but zero, so clear the lot in one go, then convert and test
+    // only the words that are not zero.
+    if (limit == 0) return 0;
+    memset(dst, 0, n * sizeof(uint16));
+    // Unrolled, since the loop's own bookkeeping is a good part of what is
+    // left of the work.
+#if defined(__clang__)
+#pragma clang loop unroll_count(16)
+#endif
+    for (; src != src_end; src += sizeof(word), dst += 4)
+    {
+        word w;
+        memcpy(&w, src, sizeof w);
+        if (w == 0) continue;
+        if (little_endian) w = ((w & low_bytes) << 8) | ((w >> 8) & low_bytes);
+        memcpy(dst, &w, sizeof w);
+        over |= w | (w + bias);     // as below
+    }
+#else
+    for (; src != src_end; src += sizeof(word), dst += 4)
     {
         word w;
         memcpy(&w, src, sizeof w);
@@ -356,6 +391,7 @@ size_t read_uint16s_below(uint16 * dst, const byte * src, size_t n, const uint16
         // bit of exactly those lanes that are >= limit.
         over |= w | (w + bias);
     }
+#endif
 
     return over & top_bits ? 0 : n;
 }
