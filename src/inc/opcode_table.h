@@ -97,5 +97,14 @@ static const opcode_t opcode_table[] =
     {{do2(setbits)},                                4, "BITSET"},
     {{do_(set_feat), NILOP},                        2, "SET_FEAT"},                 // featidx slot
     // private opcodes for internal use only, comes after all other on disk opcodes.
-    {{do_(temp_copy), NILOP},                       0, "TEMP_COPY"}
+    {{do_(temp_copy), NILOP},                       0, "TEMP_COPY"},
+    // fused opcodes: the parameters are those of the opcodes they stand for, in order.
+    {{do_(push_byte_attr_set), NILOP},              2, "PUSH_BYTE+ATTR_SET"},
+    {{do_(push_short_attr_set), NILOP},             3, "PUSH_SHORT+ATTR_SET"},
+    {{do_(push_byte_iattr_set), NILOP},             3, "PUSH_BYTE+IATTR_SET"},
+    {{do_(push_glyph_attr_attr_set), NILOP},        4, "PUSH_GLYPH_ATTR+ATTR_SET"},
+    {{do_(push_att_to_glyph_attr_attr_set), NILOP}, 4, "PUSH_ATT_TO_GLYPH_ATTR+ATTR_SET"},
+    {{do_(push_slot_attr_bitset_attr_set), NILOP},  7, "PUSH_SLOT_ATTR+BITSET+ATTR_SET"},
+    {{do_(next_ret_zero), NILOP},                   0, "NEXT+RET_ZERO"},
+    {{do_(next_push_byte_pop_ret), NILOP},          1, "NEXT+PUSH_BYTE+POP_RET"}
 };

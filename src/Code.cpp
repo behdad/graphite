@@ -186,6 +186,7 @@ Machine::Code::Code(bool is_constraint, const byte * bytecode_begin, const byte 
     assert((_constraint && immutable()) || !_constraint);
     dec.apply_analysis(_code, _code + _instr_count);
     _max_ref = dec.max_ref();
+    fuse(op_to_fn);
 
     // Now we know exactly how much code and data the program really needs
     // realloc the buffers to exactly the right size so we don't waste any
@@ -729,6 +730,55 @@ void Machine::Code::decoder::set_changed(int index) throw() {
     if (index + _slotref < 0 || index + _slotref >= NUMCONTEXTS) return;
     _contexts[index + _slotref].flags.changed= true;
     if (index + _slotref > _max_ref) _max_ref = index + _slotref;
+}
+
+
+// Put a fused instruction (see opcodes.h) in the place of the first
+// instruction of each run that has one.
+void Machine::Code::fuse(const opcode_t * const op) throw()
+{
+    // A fused instruction does not test the stack bounds between the
+    // instructions it stands for. An instruction pushes one value at most and
+    // none is run twice, so a program this short cannot overflow the stack
+    // and those tests could not fail on the upper bound; the fused
+    // instructions see to the lower one themselves.
+    if (_constraint || _instr_count < 2 || _instr_count >= Machine::STACK_MAX)
+        return;
+
+    const instr attr_set  = op[ATTR_SET].impl[0],
+                iattr_set = op[IATTR_SET].impl[0],
+                push_byte = op[PUSH_BYTE].impl[0],
+                next      = op[NEXT].impl[0];
+    instr * const last = _code + _instr_count - 1;
+    for (instr * i = _code; i != last; ++i)
+    {
+        if (i[1] == attr_set)
+        {
+            if (*i == push_byte)
+                *i = op[PUSH_BYTE_ATTR_SET].impl[0];
+            else if (*i == op[PUSH_SHORT].impl[0])
+                *i = op[PUSH_SHORT_ATTR_SET].impl[0];
+            else if (*i == op[PUSH_GLYPH_ATTR].impl[0])
+                *i = op[PUSH_GLYPH_ATTR_ATTR_SET].impl[0];
+            else if (*i == op[PUSH_ATT_TO_GLYPH_ATTR].impl[0])
+                *i = op[PUSH_ATT_TO_GLYPH_ATTR_ATTR_SET].impl[0];
+            else if (*i == op[BITSET].impl[0] && i != _code
+                        && i[-1] == op[PUSH_SLOT_ATTR].impl[0])
+                i[-1] = op[PUSH_SLOT_ATTR_BITSET_ATTR_SET].impl[0];
+        }
+        else if (i[1] == iattr_set && *i == push_byte)
+            *i = op[PUSH_BYTE_IATTR_SET].impl[0];
+    }
+
+    // The usual two ways for an action to end.
+    if (*last == op[RET_ZERO].impl[0])
+    {
+        if (last[-1] == next)
+            last[-1] = op[NEXT_RET_ZERO].impl[0];
+    }
+    else if (_instr_count > 2 && *last == op[POP_RET].impl[0]
+                && last[-1] == push_byte && last[-2] == next)
+        last[-2] = op[NEXT_PUSH_BYTE_POP_RET].impl[0];
 }
 
 

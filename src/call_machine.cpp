@@ -39,6 +39,7 @@
                             }
 
 #define EXIT(status)        { push(status); return false; }
+#define FALLBACK(name)      return name(dp, sp, sb, reg)
 
 // This is required by opcode_table.h
 #define do_(name)           instr(name)

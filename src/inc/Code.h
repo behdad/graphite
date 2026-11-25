@@ -61,6 +61,7 @@ private:
 
     void release_buffers() throw ();
     void failure(const status_t) throw();
+    void fuse(const opcode_t *) throw();
 
 public:
     static size_t estimateCodeDataOut(size_t num_bytecodes, int nRules, int nSlots);

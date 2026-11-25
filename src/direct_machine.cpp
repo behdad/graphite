@@ -27,6 +27,7 @@
 #define ENDOP_PUSH              }; goto *(sp >= sl ? &&end : *++ip);
 #define ENDOP_POP               }; goto *(sp < sb ? &&end : *++ip);
 #define EXIT(status)            { push(status); goto end; }
+#define FALLBACK(name)          goto name
 
 #define do_(name)               &&name
 

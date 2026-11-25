@@ -40,6 +40,14 @@
 //    ENDOP_POP         For an instruction that never leaves sp higher than
 //                      it found it: only the lower bound needs testing.
 //
+//    FALLBACK(name)    In a fused instruction, which stands in the place of
+//                      the first of a run of instructions and does the work
+//                      of them all: leave it to that first instruction, name,
+//                      after all. Nothing may have been changed before, the
+//                      registers included, except by slotat(): the status it
+//                      sets for a slot offset outside the slot map is set
+//                      again by name's own slotat().
+//
 //    You have access to the following named fast 'registers':
 //        sp        = The pointer to the current top of stack, the last value
 //                    pushed.
@@ -679,3 +687,123 @@ STARTOP(set_feat)
         seg.setFeature(fid, feat, pop());
     }
 ENDOP_POP
+
+// Fused instructions. None of these comes from a font: Code::fuse puts each
+// in the place of the first instruction of a run that the font's code holds.
+// It does what the instructions of the run do, in their order, and steps over
+// the others, which stay where they are (so that a context item's skip which
+// lands on one of them finds it). What it leaves out is the pushing of a
+// value that the next instruction of the run pops, and the test of the stack
+// bounds between them: the store is to an entry above the stack pointer,
+// which nothing reads before it is written again, and Code::fuse makes sure
+// the stack cannot overflow. Where the run only works as a whole if a slot is
+// there to push a value for, the fused instruction falls back when it is not:
+// when the slot map's entry is null, and when slotat() refuses the offset as
+// outside the slot map. In both cases the plain instruction then pushes
+// nothing and the rest of the run works on what the stack held, as without
+// fusing. Every slot offset here goes through slotat().
+
+STARTOP(push_byte_attr_set)
+    declare_params(2);
+    const          int  val  = int8(param[0]);
+    const attrCode      slat = attrCode(uint8(param[1]));
+    is->setAttr(&seg, slat, 0, val, smap);
+    ++ip;
+ENDOP_SAME
+
+STARTOP(push_short_attr_set)
+    declare_params(3);
+    const int16 r   = int16(param[0]) << 8
+                    | uint8(param[1]);
+    const          int  val  = r;
+    const attrCode      slat = attrCode(uint8(param[2]));
+    is->setAttr(&seg, slat, 0, val, smap);
+    ++ip;
+ENDOP_SAME
+
+STARTOP(push_byte_iattr_set)
+    declare_params(3);
+    const          int  val  = int8(param[0]);
+    const attrCode      slat = attrCode(uint8(param[1]));
+    const uint8         idx  = uint8(param[2]);
+    is->setAttr(&seg, slat, idx, val, smap);
+    ++ip;
+ENDOP_SAME
+
+STARTOP(push_glyph_attr_attr_set)
+    const byte * param = dp;
+    const unsigned int  glyph_attr  = uint8(param[0]) << 8
+                                    | uint8(param[1]);
+    const int           slot_ref    = int8(param[2]);
+    slotref slot = slotat(slot_ref);
+    if (!slot) FALLBACK(push_glyph_attr);
+    use_params(4);
+    const          int  val  = int32(seg.glyphAttr(slot->gid(), glyph_attr));
+    const attrCode      slat = attrCode(uint8(param[3]));
+    is->setAttr(&seg, slat, 0, val, smap);
+    ++ip;
+ENDOP_SAME
+
+STARTOP(push_att_to_glyph_attr_attr_set)
+    const byte * param = dp;
+    const unsigned int  glyph_attr  = uint8(param[0]) << 8
+                                    | uint8(param[1]);
+    const int           slot_ref    = int8(param[2]);
+    slotref slot = slotat(slot_ref);
+    if (!slot) FALLBACK(push_att_to_glyph_attr);
+    use_params(4);
+    slotref att = slot->attachedTo();
+    if (att) slot = att;
+    const          int  val  = int32(seg.glyphAttr(slot->gid(), glyph_attr));
+    const attrCode      slat = attrCode(uint8(param[3]));
+    is->setAttr(&seg, slat, 0, val, smap);
+    ++ip;
+ENDOP_SAME
+
+STARTOP(push_slot_attr_bitset_attr_set)
+    const byte * param = dp;
+    const attrCode      slat     = attrCode(uint8(param[0]));
+    const int           slot_ref = int8(param[1]);
+    slotref slot = slotat(slot_ref);
+    if (!slot) FALLBACK(push_slot_attr);
+    use_params(7);
+    if ((slat == gr_slatPosX || slat == gr_slatPosY) && (flags & POSITIONED) == 0)
+    {
+        seg.positionSlots(0, *smap.begin(), *(smap.end()-1), seg.currdir());
+        flags |= POSITIONED;
+    }
+    const int res = slot->getAttr(&seg, slat, 0);
+    const uint16 m  = uint16(param[2]) << 8
+                    | uint8(param[3]);
+    const uint16 v  = uint16(param[4]) << 8
+                    | uint8(param[5]);
+    const          int  val  = (res & ~m) | v;
+    const attrCode      slat2 = attrCode(uint8(param[6]));
+    is->setAttr(&seg, slat2, 0, val, smap);
+    ip += 2;
+ENDOP_SAME
+
+STARTOP(next_ret_zero)
+    if (map - &smap[0] >= int(smap.size())) DIE
+    if (is)
+    {
+        if (is == smap.highwater())
+            smap.highpassed(true);
+        is = is->next();
+    }
+    ++map;
+    EXIT(0);
+ENDOP
+
+STARTOP(next_push_byte_pop_ret)
+    if (map - &smap[0] >= int(smap.size())) DIE
+    if (is)
+    {
+        if (is == smap.highwater())
+            smap.highpassed(true);
+        is = is->next();
+    }
+    ++map;
+    declare_params(1);
+    EXIT(int8(*param));
+ENDOP
