@@ -260,12 +260,6 @@ int32 Slot::clusterMetric(const Segment *seg, uint8 metric, uint8 attrLevel, boo
 
 int Slot::getAttr(const Segment *seg, attrCode ind, uint8 subindex) const
 {
-    if (ind >= gr_slatJStretch && ind < gr_slatJStretch + 20 && ind != gr_slatJWidth)
-    {
-        int indx = ind - gr_slatJStretch;
-        return getJustify(seg, indx / 5, indx % 5);
-    }
-
     switch (ind)
     {
     case gr_slatAdvX :      return int(m_advance.x);
@@ -317,7 +311,15 @@ int Slot::getAttr(const Segment *seg, attrCode ind, uint8 subindex) const
     case gr_slatSeqBelowWt:	SLOTGETCOLATTR(seqBelowWt())
     case gr_slatSeqValignHt:SLOTGETCOLATTR(seqValignHt())
     case gr_slatSeqValignWt:SLOTGETCOLATTR(seqValignWt())
-    default : return 0;
+    default :
+        // The justification attributes of every level; gr_slatJWidth, which
+        // lies among them, is not one of them and has its case above.
+        if (ind >= gr_slatJStretch && ind < gr_slatJStretch + 20)
+        {
+            int indx = ind - gr_slatJStretch;
+            return getJustify(seg, indx / 5, indx % 5);
+        }
+        return 0;
     }
 }
 
@@ -334,19 +336,6 @@ int Slot::getAttr(const Segment *seg, attrCode ind, uint8 subindex) const
 
 void Slot::setAttr(Segment *seg, attrCode ind, uint8 subindex, int16 value, const SlotMap & map)
 {
-    if (ind == gr_slatUserDefnV1)
-    {
-        ind = gr_slatUserDefn;
-        subindex = 0;
-        if (seg->numAttrs() == 0)
-            return;
-    }
-    else if (ind >= gr_slatJStretch && ind < gr_slatJStretch + 20 && ind != gr_slatJWidth)
-    {
-        int indx = ind - gr_slatJStretch;
-        return setJustify(seg, indx / 5, indx % 5, value);
-    }
-
     switch (ind)
     {
     case gr_slatAdvX :  m_advance.x = value; break;
@@ -410,6 +399,10 @@ void Slot::setAttr(Segment *seg, attrCode ind, uint8 subindex, int16 value, cons
     case gr_slatMeasureEol :    break;
     case gr_slatJWidth :    just(value); break;
     case gr_slatSegSplit :  seg->charinfo(m_original)->addflags(value & 3); break;
+    case gr_slatUserDefnV1 :
+        if (seg->numAttrs() != 0)
+            m_userAttr[0] = value;
+        break;
     case gr_slatUserDefn :  m_userAttr[subindex] = value; break;
     case gr_slatColFlags :  {
         SlotCollision *c = seg->collisionInfo(this);
@@ -435,6 +428,13 @@ void Slot::setAttr(Segment *seg, attrCode ind, uint8 subindex, int16 value, cons
     case gr_slatSeqValignHt :	SLOTCOLSETATTR(setSeqValignHt(value))
     case gr_slatSeqValignWt :	SLOTCOLSETATTR(setSeqValignWt(value))
     default :
+        // The justification attributes of every level; gr_slatJWidth, which
+        // lies among them, is not one of them and has its case above.
+        if (ind >= gr_slatJStretch && ind < gr_slatJStretch + 20)
+        {
+            int indx = ind - gr_slatJStretch;
+            setJustify(seg, indx / 5, indx % 5, value);
+        }
         break;
     }
 }
