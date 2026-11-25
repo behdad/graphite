@@ -10,6 +10,9 @@ using namespace lz4;
 
 namespace {
 
+// The size of the words short runs are copied in, on every machine.
+size_t const WORD = sizeof(u64);
+
 inline
 u32 read_literal(u8 const * &s, u8 const * const e, u32 l) {
     if (l == 15 && s != e)
@@ -70,11 +73,15 @@ int lz4::decompress(void const *in, size_t in_size, void *out, size_t out_size)
         {
             // Copy in literal. At this point the a minimal literal + minminal
             // match plus the coda (1 + 2 + 5) must be 8 bytes or more allowing
-            // us to remain within the src buffer for an overrun_copy on
-            // machines upto 64 bits.
+            // us to remain within the src buffer when copying a whole word
+            // for a literal that is no longer than one.
             if (align(literal_len) > out_size)
                 return -1;
-            dst = overrun_copy(dst, literal, literal_len);
+            if (literal_len <= WORD && out_size >= WORD)
+                unaligned_copy<WORD>(dst, literal);
+            else
+                memcpy(dst, literal, literal_len);
+            dst += literal_len;
             out_size -= literal_len;
         }
 
@@ -86,17 +93,28 @@ int lz4::decompress(void const *in, size_t in_size, void *out, size_t out_size)
               // Wrap around checks:
               || out_size < LASTLITERALS || pcpy >= dst)
             return -1;
-        if (dst > pcpy+sizeof(unsigned long)
-            && align(match_len) <= out_size)
-            dst = overrun_copy(dst, pcpy, match_len);
+        if (match_len <= 2*WORD && match_dist >= WORD && out_size >= 2*WORD)
+        {
+            // A short match at least a word back: two whole words, the
+            // second of which may read what the first one wrote.
+            unaligned_copy<WORD>(dst, pcpy);
+            unaligned_copy<WORD>(dst + WORD, pcpy + WORD);
+            dst += match_len;
+        }
+        else if (match_dist >= match_len)
+        {
+            memcpy(dst, pcpy, match_len);
+            dst += match_len;
+        }
         else
-            dst = safe_copy(dst, pcpy, match_len);
+            dst = repeat_copy(dst, pcpy, match_len);
         out_size -= match_len;
     }
 
     if (literal > src_end - literal_len || literal_len > out_size)
         return -1;
-    dst = fast_copy(dst, literal, literal_len);
+    memcpy(dst, literal, literal_len);
+    dst += literal_len;
 
     return int(dst - (u8*)out);
 }
