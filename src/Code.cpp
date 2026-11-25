@@ -32,6 +32,17 @@
 using namespace graphite2;
 using namespace vm;
 
+// The decoder keeps a dozen or so values going from one opcode to the next.
+// They only stay in registers if the whole of it is compiled into the one
+// function that owns the decoder, so ask for that where we know how.
+#if defined(__GNUC__)
+#define DECODER_INLINE  inline __attribute__((always_inline))
+#elif defined(_MSC_VER)
+#define DECODER_INLINE  __forceinline
+#else
+#define DECODER_INLINE  inline
+#endif
+
 namespace {
 
 inline bool is_return(const opcode_t * opmap, const instr i) {
@@ -60,25 +71,26 @@ public:
     struct limits;
     static const int NUMCONTEXTS = 256;
 
-    decoder(limits & lims, Code &code, enum passtype pt, const opcode_t * op_to_fn) throw();
+    DECODER_INLINE decoder(limits & lims, Code &code, enum passtype pt, const opcode_t * op_to_fn,
+                           context * contexts) throw();
 
-    bool        load(const byte * bc_begin, const byte * bc_end);
-    void        apply_analysis(instr * const code, instr * code_end);
+    DECODER_INLINE bool     load(const byte * bc_begin, const byte * bc_end);
+    DECODER_INLINE void     apply_analysis(instr * const code, instr * code_end);
     byte        max_ref() { return _max_ref; }
     int         out_index() const { return _out_index; }
 
 private:
-    void        set_ref(int index) throw();
-    void        set_noref(int index) throw();
-    void        set_changed(int index) throw();
-    opcode      fetch_opcode(const byte * bc);
-    void        analyse_opcode(const opcode, const int8 * const dp) throw();
-    void        emit_opcode(opcode opc, const byte * & bc);
-    bool        validate_opcode(const byte opc, const byte * const bc);
-    bool        valid_upto(const uint16 limit, const uint16 x) const throw();
-    bool        test_context() const throw();
-    bool        test_ref(int8 index) const throw();
-    bool        test_attr(attrCode attr) const throw();
+    DECODER_INLINE void     set_ref(int index) throw();
+    DECODER_INLINE void     set_noref(int index) throw();
+    DECODER_INLINE void     set_changed(int index) throw();
+    DECODER_INLINE opcode   fetch_opcode(const byte * bc);
+    DECODER_INLINE void     analyse_opcode(const opcode, const int8 * const dp) throw();
+    DECODER_INLINE void     emit_opcode(opcode opc, const byte * & bc);
+    DECODER_INLINE bool     validate_opcode(const byte opc, const byte * const bc);
+    DECODER_INLINE bool     valid_upto(const uint16 limit, const uint16 x) const throw();
+    DECODER_INLINE bool     test_context() const throw();
+    DECODER_INLINE bool     test_ref(int8 index) const throw();
+    DECODER_INLINE bool     test_attr(attrCode attr) const throw();
     void        failure(const status_t s) const throw() { _code.failure(s); }
 
     Code              & _code;
@@ -92,7 +104,7 @@ private:
     int                 _stack_depth;
     bool                _in_ctxt_item;
     int16               _slotref;
-    context             _contexts[NUMCONTEXTS];
+    context     * const _contexts;      // NUMCONTEXTS of them, all clear
     byte                _max_ref;
 };
 
@@ -105,10 +117,11 @@ struct Machine::Code::decoder::limits
                      classes,
                      glyf_attrs,
                      features;
-  const byte         attrid[gr_slatMax];
+  const byte       * attrid;            // gr_slatMax of them
 };
 
-inline Machine::Code::decoder::decoder(limits & lims, Code &code, enum passtype pt, const opcode_t * op_to_fn) throw()
+Machine::Code::decoder::decoder(limits & lims, Code &code, enum passtype pt, const opcode_t * op_to_fn,
+                                context * contexts) throw()
 : _code(code),
   _out_index(code._constraint ? 0 : lims.pre_context),
   _out_length(code._constraint ? 1 : lims.rule_length),
@@ -116,7 +129,7 @@ inline Machine::Code::decoder::decoder(limits & lims, Code &code, enum passtype 
   _stack_depth(0),
   _in_ctxt_item(false),
   _slotref(0),
-  _contexts(),
+  _contexts(contexts),
   _max_ref(0)
 { }
 
@@ -152,6 +165,16 @@ Machine::Code::Code(bool is_constraint, const byte * bytecode_begin, const byte 
         return;
     }
 
+    // The two arrays are kept out of the limits and the decoder so that
+    // the compiler can hold what is left of those in registers.
+    const byte attrid[gr_slatMax] =
+        {1,1,1,1,1,1,1,1,
+         1,1,1,1,1,1,1,255,
+         1,1,1,1,1,1,1,1,
+         1,1,1,1,1,1,0,0,
+         0,0,0,0,0,0,0,0,
+         0,0,0,0,0,0,0,0,
+         0,0,0,0,0,0,0, silf.numUser()};
     decoder::limits lims = {
         bytecode_end,
         pre_context,
@@ -159,16 +182,11 @@ Machine::Code::Code(bool is_constraint, const byte * bytecode_begin, const byte 
         silf.numClasses(),
         face.glyphs().numAttrs(),
         face.numFeatures(),
-        {1,1,1,1,1,1,1,1,
-         1,1,1,1,1,1,1,255,
-         1,1,1,1,1,1,1,1,
-         1,1,1,1,1,1,0,0,
-         0,0,0,0,0,0,0,0,
-         0,0,0,0,0,0,0,0,
-         0,0,0,0,0,0,0, silf.numUser()}
+        attrid
     };
+    context contexts[decoder::NUMCONTEXTS] = {};
 
-    decoder dec(lims, *this, pt, op_to_fn);
+    decoder dec(lims, *this, pt, op_to_fn, contexts);
     if(!dec.load(bytecode_begin, bytecode_end))
        return;
 
@@ -623,7 +641,6 @@ void Machine::Code::decoder::apply_analysis(instr * const code, instr * code_end
 }
 
 
-inline
 bool Machine::Code::decoder::validate_opcode(const byte opc, const byte * const bc)
 {
     if (opc >= MAX_OPCODE)
@@ -659,7 +676,6 @@ bool Machine::Code::decoder::valid_upto(const uint16 limit, const uint16 x) cons
     return t;
 }
 
-inline
 bool Machine::Code::decoder::test_ref(int8 index) const throw()
 {
     if (_code._constraint && !_in_ctxt_item)
@@ -716,7 +732,6 @@ void Machine::Code::failure(const status_t s) throw() {
 }
 
 
-inline
 void Machine::Code::decoder::set_ref(int index) throw() {
     if (index + _slotref < 0 || index + _slotref >= NUMCONTEXTS) return;
     _contexts[index + _slotref].flags.referenced = true;
@@ -724,14 +739,12 @@ void Machine::Code::decoder::set_ref(int index) throw() {
 }
 
 
-inline
 void Machine::Code::decoder::set_noref(int index) throw() {
     if (index + _slotref < 0 || index + _slotref >= NUMCONTEXTS) return;
     if (index + _slotref > _max_ref) _max_ref = index + _slotref;
 }
 
 
-inline
 void Machine::Code::decoder::set_changed(int index) throw() {
     if (index + _slotref < 0 || index + _slotref >= NUMCONTEXTS) return;
     _contexts[index + _slotref].flags.changed= true;
