@@ -94,7 +94,7 @@ public:
     bool isBase() const { return (!m_parent); }
     void update(int numSlots, int numCharInfo, Position &relpos);
     Position finalise(const Segment* seg, const Font* font, Position & base, Rect & bbox, uint8 attrLevel, float & clusterMin, bool rtl, bool isFinal, int depth = 0);
-    Position finalise(Positioning & p, const Position & base, int depth = 0);
+    static Position finaliseClusters(Positioning & p, Slot * first, const Slot * end, bool backwards);
     bool isDeleted() const { return (m_flags & DELETED) ? true : false; }
     void markDeleted(bool state) { if (state) m_flags |= DELETED; else m_flags &= ~DELETED; }
     bool isCopied() const { return (m_flags & COPIED) ? true : false; }
@@ -137,7 +137,7 @@ public:
 
 private:
     template <bool PLAIN> const GlyphFace * place(const Positioning & p, Position & shift, float & tAdvance) const;
-    template <bool PLAIN> Position finaliseBase(Positioning & p, const Position & base, int depth);
+    template <bool PLAIN> static Position finaliseBases(Positioning & p, Slot * s, const Slot * end, bool backwards, Position currpos, int depth);
     template <bool PLAIN> float finaliseAttached(Positioning & p, const Position & base, int depth);
 
     Slot *m_next;           // linked list of slots

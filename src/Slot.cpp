@@ -78,18 +78,23 @@ Slot::Positioning::Positioning(const Segment *seg, const Font *aFont, Rect *aBbo
 
 Position Slot::finalise(const Segment *seg, const Font *font, Position & base, Rect & bbox, uint8 attrLevel, float & clusterMin, bool rtl, bool isFinal, int depth)
 {
+    // With a bbox to fill this is never the plain case. A slot that is not
+    // attached is a run of one for finaliseBases().
     Positioning p(seg, font, &bbox, attrLevel, rtl, isFinal);
     p.clusterMin = clusterMin;
-    const Position res = finalise(p, base, depth);
+    const Position res = m_parent ? Position(finaliseAttached<false>(p, base, depth), 0)
+                                  : finaliseBases<false>(p, this, m_next, false, base, depth);
     clusterMin = p.clusterMin;
     return res;
 }
 
-Position Slot::finalise(Positioning & p, const Position & base, int depth)
+// Position the clusters whose bases are among the slots from first up to end
+// (or the end of the segment), each starting where the one before it ended
+// and the first at the origin. Returns where the last one ends.
+Position Slot::finaliseClusters(Positioning & p, Slot * first, const Slot * end, bool backwards)
 {
-    if (p.plain)
-        return m_parent ? Position(finaliseAttached<true>(p, base, depth), 0) : finaliseBase<true>(p, base, depth);
-    return m_parent ? Position(finaliseAttached<false>(p, base, depth), 0) : finaliseBase<false>(p, base, depth);
+    return p.plain ? finaliseBases<true>(p, first, end, backwards, Position(0, 0), 0)
+                   : finaliseBases<false>(p, first, end, backwards, Position(0, 0), 0);
 }
 
 // The three functions below are compiled twice. PLAIN is for a Positioning
@@ -127,41 +132,53 @@ const GlyphFace * Slot::place(const Positioning & p, Position & shift, float & t
     return glyphFace;
 }
 
-// finalise() for a slot that is not attached to another.
+// finalise() for the slots from s up to end that are not attached to another:
+// each is put where the one before it ended, the first at currpos.
 template <bool PLAIN>
-Position Slot::finaliseBase(Positioning & p, const Position & base, int depth)
+inline
+Position Slot::finaliseBases(Positioning & p, Slot * s, const Slot * const end, const bool backwards, Position currpos, const int depth)
 {
-    if (depth > 100 || (!PLAIN && p.attrLevel && m_attLevel > p.attrLevel)) return Position(0, 0);
     const float scale = PLAIN ? 1.0f : p.scale;
 
-    Position shift;
-    float tAdvance;
-    const GlyphFace * glyphFace = place<PLAIN>(p, shift, tAdvance);
-
-    m_position = base + shift;
-    Position res = base + Position(tAdvance, m_advance.y * scale);
-    p.clusterMin = m_position.x;
-
-    if (!PLAIN && glyphFace && p.bbox)
+    for (; s && s != end; s = backwards ? s->m_prev : s->m_next)
     {
-        Rect ourBbox = glyphFace->theBBox() * scale + m_position;
-        *p.bbox = p.bbox->widen(ourBbox);
-    }
+        if (s->m_parent) continue;
+        if (depth > 100 || (!PLAIN && p.attrLevel && s->m_attLevel > p.attrLevel))
+        {
+            currpos = Position(0, 0);
+            continue;
+        }
 
-    if (m_child && m_child != this && m_child->attachedTo() == this)
-    {
-        const float tRes = m_child->finaliseAttached<PLAIN>(p, m_position, depth + 1);
-        if (tRes > res.x) res = Position(tRes, 0);
-    }
+        Position shift;
+        float tAdvance;
+        const GlyphFace * glyphFace = s->place<PLAIN>(p, shift, tAdvance);
 
-    if (p.clusterMin < base.x)
-    {
-        Position adj = Position(m_position.x - p.clusterMin, 0.);
-        res += adj;
-        m_position += adj;
-        if (m_child) m_child->floodShift(adj);
+        s->m_position = currpos + shift;
+        Position res = currpos + Position(tAdvance, s->m_advance.y * scale);
+        p.clusterMin = s->m_position.x;
+
+        if (!PLAIN && glyphFace && p.bbox)
+        {
+            Rect ourBbox = glyphFace->theBBox() * scale + s->m_position;
+            *p.bbox = p.bbox->widen(ourBbox);
+        }
+
+        if (s->m_child && s->m_child != s && s->m_child->attachedTo() == s)
+        {
+            const float tRes = s->m_child->finaliseAttached<PLAIN>(p, s->m_position, depth + 1);
+            if (tRes > res.x) res = Position(tRes, 0);
+        }
+
+        if (p.clusterMin < currpos.x)
+        {
+            Position adj = Position(s->m_position.x - p.clusterMin, 0.);
+            res += adj;
+            s->m_position += adj;
+            if (s->m_child) s->m_child->floodShift(adj);
+        }
+        currpos = res;
     }
-    return res;
+    return currpos;
 }
 
 // finalise() for a slot that is attached to another. All the slots finalise()

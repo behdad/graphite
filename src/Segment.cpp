@@ -284,28 +284,8 @@ Position Segment::positionSlots(const Font *font, Slot * iStart, Slot * iEnd, bo
 
     // Nobody wants the bounding box of the slots positioned here.
     Slot::Positioning pos(this, font, NULL, 0, isRtl, isFinal);
-    if (isRtl)
-    {
-        for (Slot * s = iEnd, * const end = iStart->prev(); s && s != end; s = s->prev())
-        {
-            if (s->isBase())
-            {
-                pos.clusterMin = currpos.x;
-                currpos = s->finalise(pos, currpos);
-            }
-        }
-    }
-    else
-    {
-        for (Slot * s = iStart, * const end = iEnd->next(); s && s != end; s = s->next())
-        {
-            if (s->isBase())
-            {
-                pos.clusterMin = currpos.x;
-                currpos = s->finalise(pos, currpos);
-            }
-        }
-    }
+    currpos = isRtl ? Slot::finaliseClusters(pos, iEnd, iStart->prev(), true)
+                    : Slot::finaliseClusters(pos, iStart, iEnd->next(), false);
     if (reorder)
         reverseSlots();
     return currpos;
