@@ -1056,22 +1056,26 @@ void SlotCollision::initFromSlot(Segment *seg, Slot *slot)
     const GlyphFace * glyphFace = seg->getFace()->glyphs().glyphSafe(gid);
     if (!glyphFace)
         return;
-    const sparse &p = glyphFace->attrs();
-    _flags = p[aCol];
-    _limit = Rect(Position(int16(p[aCol+1]), int16(p[aCol+2])),
-                  Position(int16(p[aCol+3]), int16(p[aCol+4])));
-    _margin = p[aCol+5];
-    _marginWt = p[aCol+6];
+    // The sixteen attributes aCol .. aCol+15, read in key order.
+    sparse::reader p(glyphFace->attrs(), aCol);
+    _flags = p.next();
+    const int16 limitblx = int16(p.next()),
+                limitbly = int16(p.next()),
+                limittrx = int16(p.next()),
+                limittry = int16(p.next());
+    _limit = Rect(Position(limitblx, limitbly), Position(limittrx, limittry));
+    _margin = p.next();
+    _marginWt = p.next();
 
-    _seqClass = p[aCol+7];
-	_seqProxClass = p[aCol+8];
-    _seqOrder = p[aCol+9];
-	_seqAboveXoff = p[aCol+10];
-	_seqAboveWt = p[aCol+11];
-	_seqBelowXlim = p[aCol+12];
-	_seqBelowWt = p[aCol+13];
-	_seqValignHt = p[aCol+14];
-	_seqValignWt = p[aCol+15];
+    _seqClass = p.next();
+	_seqProxClass = p.next();
+    _seqOrder = p.next();
+	_seqAboveXoff = p.next();
+	_seqAboveWt = p.next();
+	_seqBelowXlim = p.next();
+	_seqBelowWt = p.next();
+	_seqValignHt = p.next();
+	_seqValignWt = p.next();
 
     // These attributes do not have corresponding glyph attribute:
     _exclGlyph = 0;
