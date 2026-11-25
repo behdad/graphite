@@ -822,20 +822,44 @@ bool Pass::runFSM(FiniteStateMachine& fsm, Slot * slot) const
     Slot * * const map = fsm.slots.begin(),
          * * const end = map + SlotMap::MAX_SLOTS,
          * * free = map;
-    bool res = true;
-    do
+    // A state without transitions ends the run once one more slot is in
+    // the map. As m_successStart is not above m_numTransition, only a start
+    // state or a success state can be one, and never state 0 once in the
+    // loop: it is tested for where it can turn up.
+    if (state >= numTransition)
+        *free++ = slot;
+    else for (;;)
     {
         *free++ = slot;
         const unsigned int gid = slot->gid();
         if (gid >= numGlyphs) break;
         const unsigned int col = cols[gid];
         if (col == 0xffffU) break;
-        if (free == end) { res = false; break; }
-        if (state >= numTransition) break;
+        if (free == end)
+        {
+            fsm.slots.size(SlotMap::MAX_SLOTS);
+            return false;
+        }
 
         state = transitions[state*numColumns + col];
         if (state >= successStart)
+        {
             fsm.rules.accumulate_rules(states[state]);
+            if (state >= numTransition)
+            {
+                // What the loop would do with the next slot before it
+                // came to test the state.
+                slot = slot->next();
+                *free++ = slot;
+                if (slot && slot->gid() < numGlyphs
+                        && cols[slot->gid()] != 0xffffU && free == end)
+                {
+                    fsm.slots.size(SlotMap::MAX_SLOTS);
+                    return false;
+                }
+                break;
+            }
+        }
 
         slot = slot->next();
         if (state == 0 || !slot)
@@ -843,10 +867,10 @@ bool Pass::runFSM(FiniteStateMachine& fsm, Slot * slot) const
             *free++ = slot;
             break;
         }
-    } while (true);
+    }
 
     fsm.slots.size(free - map);
-    return res;
+    return true;
 }
 
 #if !defined GRAPHITE2_NTRACING
