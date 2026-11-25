@@ -99,10 +99,11 @@ namespace
     }
 
     // Construct glyph with the attributes in the glat entries between glat
-    // and end.
+    // and end. Returns how many values those entries hold, or -1 if they
+    // were not counted.
     template<typename W>
-    void make_glyph(GlyphFace & glyph, const Rect & bbox, const Position & advance,
-                    const byte * const glat, const byte * const end)
+    int make_glyph(GlyphFace & glyph, const Rect & bbox, const Position & advance,
+                   const byte * const glat, const byte * const end)
     {
         glat_attr attrs[64];
         const int num = decode_glat<W>(glat, end, attrs, sizeof attrs/sizeof attrs[0]);
@@ -110,6 +111,7 @@ namespace
             new (&glyph) GlyphFace(bbox, advance, _glat_iterator<W>(glat), _glat_iterator<W>(end));
         else
             new (&glyph) GlyphFace(bbox, advance, attrs, attrs + num);
+        return num;
     }
 }
 
@@ -432,6 +434,7 @@ const GlyphFace * GlyphCache::Loader::read_glyph(unsigned short glyphid, GlyphFa
             return 0;
 
         const uint32 glat_version = be::peek<uint32>(m_pGlat);
+        int num_values;
         if (glat_version >= 0x00030000)
         {
             if (glocs >= gloce)
@@ -449,7 +452,7 @@ const GlyphFace * GlyphCache::Loader::read_glyph(unsigned short glyphid, GlyphFa
             if (gloce - glocs < 2*sizeof(byte)+sizeof(uint16)
                 || gloce - glocs > _num_attrs*(2*sizeof(byte)+sizeof(uint16)))
                     return 0;
-            make_glyph<uint8>(glyph, bbox, advance, m_pGlat + glocs, m_pGlat + gloce);
+            num_values = make_glyph<uint8>(glyph, bbox, advance, m_pGlat + glocs, m_pGlat + gloce);
         }
         else
         {
@@ -457,9 +460,12 @@ const GlyphFace * GlyphCache::Loader::read_glyph(unsigned short glyphid, GlyphFa
                 || gloce - glocs > _num_attrs*3*sizeof(uint16)
                 || glocs > m_pGlat.size() - 2*sizeof(uint16))
                     return 0;
-            make_glyph<uint16>(glyph, bbox, advance, m_pGlat + glocs, m_pGlat + gloce);
+            num_values = make_glyph<uint16>(glyph, bbox, advance, m_pGlat + glocs, m_pGlat + gloce);
         }
-        if (!glyph.attrs() || glyph.attrs().capacity() > _num_attrs)
+        // The attributes stored are never more than the values they were
+        // made from, so they only need counting when those were too many.
+        if (!glyph.attrs()
+            || ((num_values < 0 || num_values > _num_attrs) && glyph.attrs().capacity() > _num_attrs))
             return 0;
     }
     return &glyph;
