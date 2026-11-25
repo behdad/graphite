@@ -62,70 +62,125 @@ void Slot::update(int /*numGrSlots*/, int numCharInfo, Position &relpos)
     m_position = m_position + relpos;
 }
 
+Slot::Positioning::Positioning(const Segment *seg, const Font *aFont, Rect *aBbox, uint8 aAttrLevel, bool isRtl, bool isFinal)
+: font(aFont),
+  glyphs(aBbox || aFont ? &seg->getFace()->glyphs() : NULL),
+  collisions(isFinal ? seg->collisions() : NULL),
+  bbox(aBbox),
+  scale(aFont ? aFont->scale() : 1.0f),
+  dirSign(isRtl * -2 + 1),
+  clusterMin(0),
+  attrLevel(aAttrLevel),
+  rtl(isRtl)
+{
+}
+
 Position Slot::finalise(const Segment *seg, const Font *font, Position & base, Rect & bbox, uint8 attrLevel, float & clusterMin, bool rtl, bool isFinal, int depth)
 {
-    SlotCollision *coll = NULL;
-    if (depth > 100 || (attrLevel && m_attLevel > attrLevel)) return Position(0, 0);
-    float scale = font ? font->scale() : 1.0f;
-    Position shift(m_shift.x * (rtl * -2 + 1) + m_just, m_shift.y);
-    float tAdvance = m_advance.x + m_just;
-    if (isFinal && (coll = seg->collisionInfo(this)))
+    Positioning p(seg, font, &bbox, attrLevel, rtl, isFinal);
+    p.clusterMin = clusterMin;
+    const Position res = finalise(p, base, depth);
+    clusterMin = p.clusterMin;
+    return res;
+}
+
+// How far this slot is moved from where it would otherwise go, and how far
+// it advances, in the units of the font. Returns the glyph's metrics, or NULL
+// if nothing needs them.
+inline
+const GlyphFace * Slot::place(const Positioning & p, Position & shift, float & tAdvance) const
+{
+    shift = Position(m_shift.x * p.dirSign + m_just, m_shift.y);
+    tAdvance = m_advance.x + m_just;
+    if (p.collisions)
     {
-        const Position &collshift = coll->offset();
-        if (!(coll->flags() & SlotCollision::COLL_KERN) || rtl)
-            shift = shift + collshift;
+        const SlotCollision & coll = p.collisions[m_index];
+        if (!(coll.flags() & SlotCollision::COLL_KERN) || p.rtl)
+            shift = shift + coll.offset();
     }
-    const GlyphFace * glyphFace = seg->getFace()->glyphs().glyphSafe(glyph());
-    if (font)
+    if (!p.glyphs)
+        return NULL;
+    const GlyphFace * glyphFace = p.glyphs->glyphSafe(glyph());
+    if (p.font)
     {
-        scale = font->scale();
-        shift *= scale;
-        if (font->isHinted() && glyphFace)
-            tAdvance = (m_advance.x - glyphFace->theAdvance().x + m_just) * scale + font->advance(glyph());
+        shift *= p.scale;
+        if (p.font->isHinted() && glyphFace)
+            tAdvance = (m_advance.x - glyphFace->theAdvance().x + m_just) * p.scale + p.font->advance(glyph());
         else
-            tAdvance *= scale;
+            tAdvance *= p.scale;
     }
-    Position res;
+    return glyphFace;
+}
+
+Position Slot::finalise(Positioning & p, const Position & base, int depth)
+{
+    if (m_parent)
+        return Position(finaliseAttached(p, base, depth), 0);
+    if (depth > 100 || (p.attrLevel && m_attLevel > p.attrLevel)) return Position(0, 0);
+
+    Position shift;
+    float tAdvance;
+    const GlyphFace * glyphFace = place(p, shift, tAdvance);
 
     m_position = base + shift;
-    if (!m_parent)
-    {
-        res = base + Position(tAdvance, m_advance.y * scale);
-        clusterMin = m_position.x;
-    }
-    else
-    {
-        float tAdv;
-        m_position += (m_attach - m_with) * scale;
-        tAdv = m_advance.x >= 0.5f ? m_position.x + tAdvance - shift.x : 0.f;
-        res = Position(tAdv, 0);
-        if ((m_advance.x >= 0.5f || m_position.x < 0) && m_position.x < clusterMin) clusterMin = m_position.x;
-    }
+    Position res = base + Position(tAdvance, m_advance.y * p.scale);
+    p.clusterMin = m_position.x;
 
-    if (glyphFace)
+    if (glyphFace && p.bbox)
     {
-        Rect ourBbox = glyphFace->theBBox() * scale + m_position;
-        bbox = bbox.widen(ourBbox);
+        Rect ourBbox = glyphFace->theBBox() * p.scale + m_position;
+        *p.bbox = p.bbox->widen(ourBbox);
     }
 
     if (m_child && m_child != this && m_child->attachedTo() == this)
     {
-        Position tRes = m_child->finalise(seg, font, m_position, bbox, attrLevel, clusterMin, rtl, isFinal, depth + 1);
-        if ((!m_parent || m_advance.x >= 0.5f) && tRes.x > res.x) res = tRes;
+        const float tRes = m_child->finaliseAttached(p, m_position, depth + 1);
+        if (tRes > res.x) res = Position(tRes, 0);
     }
 
-    if (m_parent && m_sibling && m_sibling != this && m_sibling->attachedTo() == m_parent)
+    if (p.clusterMin < base.x)
     {
-        Position tRes = m_sibling->finalise(seg, font, base, bbox, attrLevel, clusterMin, rtl, isFinal, depth + 1);
-        if (tRes.x > res.x) res = tRes;
-    }
-
-    if (!m_parent && clusterMin < base.x)
-    {
-        Position adj = Position(m_position.x - clusterMin, 0.);
+        Position adj = Position(m_position.x - p.clusterMin, 0.);
         res += adj;
         m_position += adj;
         if (m_child) m_child->floodShift(adj);
+    }
+    return res;
+}
+
+// finalise() for a slot that is attached to another. All the slots finalise()
+// goes on to from the one it is given are, and what such a slot returns always
+// has a y of zero, so only the x is returned.
+float Slot::finaliseAttached(Positioning & p, const Position & base, int depth)
+{
+    if (depth > 100 || (p.attrLevel && m_attLevel > p.attrLevel)) return 0.f;
+
+    Position shift;
+    float tAdvance;
+    const GlyphFace * glyphFace = place(p, shift, tAdvance);
+
+    m_position = base + shift;
+    m_position += (m_attach - m_with) * p.scale;
+    const bool advances = m_advance.x >= 0.5f;
+    float res = advances ? m_position.x + tAdvance - shift.x : 0.f;
+    if ((advances || m_position.x < 0) && m_position.x < p.clusterMin) p.clusterMin = m_position.x;
+
+    if (glyphFace && p.bbox)
+    {
+        Rect ourBbox = glyphFace->theBBox() * p.scale + m_position;
+        *p.bbox = p.bbox->widen(ourBbox);
+    }
+
+    if (m_child && m_child != this && m_child->attachedTo() == this)
+    {
+        const float tRes = m_child->finaliseAttached(p, m_position, depth + 1);
+        if (advances && tRes > res) res = tRes;
+    }
+
+    if (m_sibling && m_sibling != this && m_sibling->attachedTo() == m_parent)
+    {
+        const float tRes = m_sibling->finaliseAttached(p, base, depth + 1);
+        if (tRes > res) res = tRes;
     }
     return res;
 }

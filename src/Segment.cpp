@@ -266,8 +266,6 @@ void Segment::linkClusters(Slot *s, Slot * end)
 Position Segment::positionSlots(const Font *font, Slot * iStart, Slot * iEnd, bool isRtl, bool isFinal)
 {
     Position currpos(0., 0.);
-    float clusterMin = 0.;
-    Rect bbox;
     bool reorder = (currdir() != isRtl);
 
     if (reorder)
@@ -284,12 +282,17 @@ Position Segment::positionSlots(const Font *font, Slot * iStart, Slot * iEnd, bo
     if (!iStart || !iEnd)   // only true for empty segments
         return currpos;
 
+    // Nobody wants the bounding box of the slots positioned here.
+    Slot::Positioning pos(this, font, NULL, 0, isRtl, isFinal);
     if (isRtl)
     {
         for (Slot * s = iEnd, * const end = iStart->prev(); s && s != end; s = s->prev())
         {
             if (s->isBase())
-                currpos = s->finalise(this, font, currpos, bbox, 0, clusterMin = currpos.x, isRtl, isFinal);
+            {
+                pos.clusterMin = currpos.x;
+                currpos = s->finalise(pos, currpos);
+            }
         }
     }
     else
@@ -297,7 +300,10 @@ Position Segment::positionSlots(const Font *font, Slot * iStart, Slot * iEnd, bo
         for (Slot * s = iStart, * const end = iEnd->next(); s && s != end; s = s->next())
         {
             if (s->isBase())
-                currpos = s->finalise(this, font, currpos, bbox, 0, clusterMin = currpos.x, isRtl, isFinal);
+            {
+                pos.clusterMin = currpos.x;
+                currpos = s->finalise(pos, currpos);
+            }
         }
     }
     if (reorder)
