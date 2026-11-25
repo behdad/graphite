@@ -73,7 +73,7 @@ private:
     void        set_changed(int index) throw();
     opcode      fetch_opcode(const byte * bc);
     void        analyse_opcode(const opcode, const int8 * const dp) throw();
-    bool        emit_opcode(opcode opc, const byte * & bc);
+    void        emit_opcode(opcode opc, const byte * & bc);
     bool        validate_opcode(const byte opc, const byte * const bc);
     bool        valid_upto(const uint16 limit, const uint16 x) const throw();
     bool        test_context() const throw();
@@ -231,17 +231,60 @@ Machine::Code::~Code() throw ()
 
 bool Machine::Code::decoder::load(const byte * bc, const byte * bc_end)
 {
+    // What is needed to finish off the context item being decoded, if any.
+    // Context items cannot nest, fetch_opcode sees to that.
+    const byte * outer_end  = 0;    // where the code around the item ends
+    byte       * instr_skip = 0,    // the item's skip counts, to be split
+               * data_skip  = 0;    // once the item has been decoded
+    size_t       ctxt_start = 0;    // instruction count at the item's start
+
     _max.bytecode = bc_end;
-    while (bc < bc_end)
+    for (;;)
     {
-        const opcode opc = fetch_opcode(bc++);
-        if (opc == vm::MAX_OPCODE)
-            return false;
+        while (bc < bc_end)
+        {
+            const opcode opc = fetch_opcode(bc++);
+            if (opc == vm::MAX_OPCODE)
+                return false;
 
-        analyse_opcode(opc, reinterpret_cast<const int8 *>(bc));
+            analyse_opcode(opc, reinterpret_cast<const int8 *>(bc));
 
-        if (!emit_opcode(opc, bc))
-            return false;
+            emit_opcode(opc, bc);
+
+            // decode a context item's code as part of this same loop, as if
+            // it were all there is, so we can split the skip into
+            // instruction and data portions when we reach the end of it.
+            if (opc == CNTXT_ITEM)
+            {
+                assert(_out_index == 0);
+                _in_ctxt_item = true;
+                _out_index = _max.pre_context + int8(_data[-2]);
+                _slotref = int8(_data[-2]);
+                _out_length = _max.rule_length;
+
+                ctxt_start = _code._instr_count;
+                instr_skip = _data - 1;
+                data_skip  = _data++;
+                ++_code._data_size;
+                outer_end = bc_end;
+                bc_end = bc + *instr_skip;
+                _max.bytecode = bc_end;
+            }
+        }
+
+        if (!_in_ctxt_item)
+            break;
+
+        // That was the end of a context item, carry on with what follows it.
+        *data_skip  = *instr_skip - byte(_code._instr_count - ctxt_start);
+        *instr_skip =  byte(_code._instr_count - ctxt_start);
+        bc_end = outer_end;
+        _max.bytecode = bc_end;
+
+        _out_length = 1;
+        _out_index = 0;
+        _slotref = 0;
+        _in_ctxt_item = false;
     }
 
     return bool(_code);
@@ -535,15 +578,11 @@ void Machine::Code::decoder::analyse_opcode(const opcode opc, const int8  * arg)
 }
 
 
-bool Machine::Code::decoder::emit_opcode(opcode opc, const byte * & bc)
+void Machine::Code::decoder::emit_opcode(opcode opc, const byte * & bc)
 {
+    // validate_opcode has already turned away opcodes without an
+    // implementation.
     const opcode_t & op       = _op_to_fn[opc];
-    if (op.impl[_code._constraint] == 0)
-    {
-        failure(unimplemented_opcode_used);
-        return false;
-    }
-
     const size_t     param_sz = op.param_sz == VARARGS ? bc[0] + 1 : op.param_sz;
 
     // Add this instruction
@@ -558,43 +597,6 @@ bool Machine::Code::decoder::emit_opcode(opcode opc, const byte * & bc)
         _code._data_size += param_sz;
     }
 
-    // recursively decode a context item so we can split the skip into
-    // instruction and data portions.
-    if (opc == CNTXT_ITEM)
-    {
-        assert(_out_index == 0);
-        _in_ctxt_item = true;
-        _out_index = _max.pre_context + int8(_data[-2]);
-        _slotref = int8(_data[-2]);
-        _out_length = _max.rule_length;
-
-        const size_t ctxt_start = _code._instr_count;
-        byte & instr_skip = _data[-1];
-        byte & data_skip  = *_data++;
-        ++_code._data_size;
-        const byte *curr_end = _max.bytecode;
-
-        if (load(bc, bc + instr_skip))
-        {
-            bc += instr_skip;
-            data_skip  = instr_skip - byte(_code._instr_count - ctxt_start);
-            instr_skip =  byte(_code._instr_count - ctxt_start);
-            _max.bytecode = curr_end;
-
-            _out_length = 1;
-            _out_index = 0;
-            _slotref = 0;
-            _in_ctxt_item = false;
-        }
-        else
-        {
-            _out_index = 0;
-            _slotref = 0;
-            return false;
-        }
-    }
-
-    return bool(_code);
 }
 
 
