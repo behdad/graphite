@@ -62,7 +62,8 @@ public:
 
     enum {
         SEG_INITCOLLISIONS = 1,
-        SEG_HASCOLLISIONS = 2
+        SEG_HASCOLLISIONS = 2,
+        SEG_JUSTIFIED = 4       // justify() has been at the slot list
     };
 
     size_t slotCount() const { return m_numGlyphs; }      //one slot per glyph

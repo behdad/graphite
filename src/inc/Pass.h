@@ -37,7 +37,7 @@ public:
 
     CLASS_NEW_DELETE
 private:
-    void    findNDoRule(Slot* & iSlot, vm::Machine &, FiniteStateMachine& fsm) const;
+    void    findNDoRule(Slot* & iSlot, vm::Machine &, FiniteStateMachine& fsm, const byte * context) const;
     int     doAction(const vm::Machine::Code* codeptr, Slot * & slot_out, vm::Machine &) const;
     bool    testPassConstraint(vm::Machine & m) const;
     bool    testConstraint(const Rule & r, vm::Machine &) const;
@@ -49,9 +49,9 @@ private:
     bool    readStates(const byte * starts, const byte * states, const byte * o_rule_map, Face &, Error &e);
     bool    readRanges(const byte * ranges, size_t num_ranges, Error &e);
     bool    buildFilter(const byte * ranges, size_t num_ranges, Face &, Error &e);
-    bool    couldMatch(const Slot * slot) const;
+    bool    couldMatch(const byte * filter, const Slot * slot) const;
     uint16  glyphToCol(const uint16 gid) const;
-    bool    runFSM(FiniteStateMachine & fsm, Slot * slot) const;
+    bool    runFSM(FiniteStateMachine & fsm, Slot * slot, const byte * context) const;
     bool    runAtCursor(FiniteStateMachine & fsm, Slot * cursor) const;
     bool    runFrom(FiniteStateMachine & fsm, Slot * slot, unsigned int state, Slot * * free) const;
     void    dumpRuleEventConsidered(const FiniteStateMachine & fsm, const RuleEntry & re) const;

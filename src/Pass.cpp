@@ -662,7 +662,11 @@ private:
 // start there in any of them: m_atCursor.
 //
 // All of this takes the slots to be linked consistently, so that going back
-// from the cursor and forward again comes to the cursor.
+// from the cursor and forward again comes to the cursor. While a segment is
+// made they are: each slot of the list is linked to its neighbours both ways,
+// and a run starts at a slot of the list or at one with no slot before it.
+// In the passes that Segment::justify() runs they need not be, and
+// runGraphite() uses none of this there.
 //
 // ranges is what readRanges() has checked and read m_cols from.
 bool Pass::buildFilter(const byte * ranges, size_t num_ranges, Face & face, Error &e)
@@ -891,10 +895,10 @@ bool Pass::buildFilter(const byte * ranges, size_t num_ranges, Face & face, Erro
 }
 
 // False only when runFSM() at this slot is certain to end with no rule to test.
+// filter is m_filter, or null where it is not to be consulted.
 inline
-bool Pass::couldMatch(const Slot * slot) const
+bool Pass::couldMatch(const byte * const filter, const Slot * slot) const
 {
-    const byte * const filter = m_filter;
     if (!filter) return true;
 
     const unsigned int gid = slot->gid();
@@ -933,16 +937,25 @@ bool Pass::runGraphite(vm::Machine & m, FiniteStateMachine & fsm, bool reverse) 
         json::closer rules_array_closer(fsm.dbgout);
 #endif
 
+        // What buildFilter() has set up is for slots linked the way they are
+        // while a segment is made, where going back from the cursor and
+        // forward again comes to the cursor. Segment::justify() runs passes
+        // too, on a list that is not like that, and there every run is made,
+        // and made from as far back as it goes.
+        const bool asMade = !(m.slotMap().segment.flags() & Segment::SEG_JUSTIFIED);
+        const byte * const filter  = asMade ? m_filter : 0,
+                   * const context = asMade ? m_context : 0;
+
         m.slotMap().highwater(currHigh);
         int lc = m_iMaxLoop;
-        bool match = couldMatch(s);
+        bool match = couldMatch(filter, s);
         do
         {
             // Without a rule to test, all findNDoRule does is to move on,
             // and only a rule can change the machine's status.
             if (match)
             {
-                findNDoRule(s, m, fsm);
+                findNDoRule(s, m, fsm, context);
                 if (m.status() != Machine::finished) return false;
             }
             else
@@ -957,13 +970,13 @@ bool Pass::runGraphite(vm::Machine & m, FiniteStateMachine & fsm, bool reverse) 
                     // to be, each slot that nothing can match takes one turn
                     // of this loop that moves s on by one and comes back to
                     // this point. Take those turns here.
-                    while (!(match = couldMatch(s)) && s->next())
+                    while (!(match = couldMatch(filter, s)) && s->next())
                         s = s->next();
                     m.slotMap().highwater(s->next());
                     continue;
                 }
             }
-            if (s) match = couldMatch(s);
+            if (s) match = couldMatch(filter, s);
         } while (s);
     }
     //TODO: Use enums for flags
@@ -1095,9 +1108,9 @@ bool Pass::runAtCursor(FiniteStateMachine & fsm, Slot * const cursor) const
     return runFrom(fsm, slot, state, map);
 }
 
-bool Pass::runFSM(FiniteStateMachine& fsm, Slot * slot) const
+// context is m_context, or null where the run is not to start at the cursor.
+bool Pass::runFSM(FiniteStateMachine& fsm, Slot * slot, const byte * const context) const
 {
-    const byte * const context = m_context;
     if (context && slot->gid() < m_numGlyphs && (context[slot->gid()] & CONTEXT_UNIFORM))
         return runAtCursor(fsm, slot);
 
@@ -1127,11 +1140,11 @@ Slot * output_slot(const SlotMap &  slots, const int n)
 
 #endif //!defined GRAPHITE2_NTRACING
 
-void Pass::findNDoRule(Slot * & slot, Machine &m, FiniteStateMachine & fsm) const
+void Pass::findNDoRule(Slot * & slot, Machine &m, FiniteStateMachine & fsm, const byte * const context) const
 {
     assert(slot);
 
-    if (runFSM(fsm, slot))
+    if (runFSM(fsm, slot, context))
     {
         // Search for the first rule which passes the constraint
         const RuleEntry *        r = fsm.rules.begin(),
