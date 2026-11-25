@@ -736,65 +736,192 @@ static float localmin(float al, float au, float bl, float bu, float x)
     return x;
 }
 
-// Return the given edge of the glyph at height y, taking any slant box into account.
-static float get_edge(Segment *seg, const Slot *s, const Position &shift, float y, float width, float margin, bool isRight)
+// Finds the given edge of a slot's glyph at a height y, taking any slant box
+// into account. The KernColliders ask for the edge of the same slot in one
+// horizontal slice after another, so everything that does not depend on y is
+// worked out once per slot, in set(), and at() is left with the arithmetic
+// that involves y.
+namespace
 {
-    const GlyphCache &gc = seg->getFace()->glyphs();
-    unsigned short gid = s->gid();
-    float sx = s->origin().x + shift.x;
-    float sy = s->origin().y + shift.y;
-    uint8 numsub = gc.numSubBounds(gid);
-    float res = isRight ? (float)-1e38 : (float)1e38;
 
-    if (numsub > 0)
+class GlyphEdge
+{
+public:
+    void set(const GlyphCache &gc, const Slot *s, const Position &shift, float margin, bool isRight);
+    float at(float y, float width) const;
+
+private:
+    // The part of a box's contribution that is the same for every slice.
+    struct Box
     {
-        for (int i = 0; i < numsub; ++i)
+        float   ymin,   // bottom of the box less the margin
+                ymax,   // top of the box plus the margin
+                x,      // the box's vertical edge
+                td,     // its diff-diagonal edge, less y
+                ts;     // its sum-diagonal edge, plus y
+    };
+    // A glyph has at most 16 sub-boxes (one per bit of its box bitmap). Any
+    // beyond NCACHED would be worked out afresh for each slice.
+    enum { NCACHED = 16 };
+
+    void subBox(Box &b, int i) const;
+    static void leftEdge(float &res, const Box &b, float y, float hw, float ytop, float ybot);
+    static void rightEdge(float &res, const Box &b, float y, float hw, float ytop, float ybot);
+
+    const GlyphCache  * _gc;
+    Box                 _boxes[NCACHED];    // sub-boxes, or in [0] the whole glyph if it has none
+    float               _sx, _sy;           // slot position
+    float               _margin;
+    float               _d, _s;             // diagonal edges of a glyph without sub-boxes
+    int                 _numsub;
+    unsigned short      _gid;
+    bool                _isRight;
+};
+
+inline
+void GlyphEdge::subBox(Box &b, int i) const
+{
+    const BBox &sbb = _gc->getSubBoundingBBox(_gid, i);
+    const SlantBox &ssb = _gc->getSubBoundingSlantBox(_gid, i);
+    b.ymin = _sy + sbb.yi - _margin;
+    b.ymax = _sy + sbb.ya + _margin;
+    if (_isRight)
+    {
+        b.x  = _sx + sbb.xa + _margin;
+        b.td = _sx - _sy + ssb.da + _margin;
+        b.ts = _sx + _sy + ssb.sa + _margin;
+    }
+    else
+    {
+        b.x  = _sx + sbb.xi - _margin;
+        b.td = _sx - _sy + ssb.di - _margin;
+        b.ts = _sx + _sy + ssb.si - _margin;
+    }
+}
+
+inline
+void GlyphEdge::set(const GlyphCache &gc, const Slot *s, const Position &shift, float margin, bool isRight)
+{
+    _gc = &gc;
+    _gid = s->gid();
+    _sx = s->origin().x + shift.x;
+    _sy = s->origin().y + shift.y;
+    _margin = margin;
+    _isRight = isRight;
+    _numsub = gc.numSubBounds(_gid);
+
+    if (_numsub > 0)
+    {
+        for (int i = 0, n = min(_numsub, int(NCACHED)); i < n; ++i)
+            subBox(_boxes[i], i);
+    }
+    else
+    {
+        const BBox &bb = gc.getBoundingBBox(_gid);
+        const SlantBox &sb = gc.getBoundingSlantBox(_gid);
+        Box &b = _boxes[0];
+        b.ymin = _sy + bb.yi - margin;
+        b.ymax = _sy + bb.ya + margin;
+        b.td = _sx - _sy;
+        b.ts = _sx + _sy;
+        if (isRight)
         {
-            const BBox &sbb = gc.getSubBoundingBBox(gid, i);
-            const SlantBox &ssb = gc.getSubBoundingSlantBox(gid, i);
-            if (sy + sbb.yi - margin > y + width / 2 || sy + sbb.ya + margin < y - width / 2)
-                continue;
-            if (isRight)
+            b.x = _sx + bb.xa;
+            _d = sb.da;
+            _s = sb.sa;
+        }
+        else
+        {
+            b.x = _sx + bb.xi;
+            _d = sb.di;
+            _s = sb.si;
+        }
+    }
+}
+
+// Merge one sub-box into the right edge found so far for the slice at y.
+inline
+void GlyphEdge::rightEdge(float &res, const Box &b, float y, float hw, float ytop, float ybot)
+{
+    if (b.ymin > ytop || b.ymax < ybot)
+        return;
+    float x = b.x;
+    if (x > res)
+    {
+        float td = b.td + y;
+        float ts = b.ts - y;
+        x = localmax(td - hw, td + hw,  ts - hw, ts + hw, x);
+        if (x > res)
+            res = x;
+    }
+}
+
+// Merge one sub-box into the left edge found so far for the slice at y.
+inline
+void GlyphEdge::leftEdge(float &res, const Box &b, float y, float hw, float ytop, float ybot)
+{
+    if (b.ymin > ytop || b.ymax < ybot)
+        return;
+    float x = b.x;
+    if (x < res)
+    {
+        float td = b.td + y;
+        float ts = b.ts - y;
+        x = localmin(td - hw, td + hw, ts - hw, ts + hw, x);
+        if (x < res)
+            res = x;
+    }
+}
+
+inline
+float GlyphEdge::at(float y, float width) const
+{
+    const float hw = width / 2;
+    const float ytop = y + hw;
+    const float ybot = y - hw;
+    float res = _isRight ? (float)-1e38 : (float)1e38;
+
+    if (_numsub > 0)
+    {
+        const int ncached = min(_numsub, int(NCACHED));
+        Box extra;
+        if (_isRight)
+        {
+            for (const Box *b = _boxes, * const e = _boxes + ncached; b != e; ++b)
+                rightEdge(res, *b, y, hw, ytop, ybot);
+            for (int i = ncached; i < _numsub; ++i)
             {
-                float x = sx + sbb.xa + margin;
-                if (x > res)
-                {
-                    float td = sx - sy + ssb.da + margin + y;
-                    float ts = sx + sy + ssb.sa + margin - y;
-                    x = localmax(td - width / 2, td + width / 2,  ts - width / 2, ts + width / 2, x);
-                    if (x > res)
-                        res = x;
-                }
+                subBox(extra, i);
+                rightEdge(res, extra, y, hw, ytop, ybot);
             }
-            else
+        }
+        else
+        {
+            for (const Box *b = _boxes, * const e = _boxes + ncached; b != e; ++b)
+                leftEdge(res, *b, y, hw, ytop, ybot);
+            for (int i = ncached; i < _numsub; ++i)
             {
-                float x = sx + sbb.xi - margin;
-                if (x < res)
-                {
-                    float td = sx - sy + ssb.di - margin + y;
-                    float ts = sx + sy + ssb.si - margin - y;
-                    x = localmin(td - width / 2, td + width / 2, ts - width / 2, ts + width / 2, x);
-                    if (x < res)
-                        res = x;
-                }
+                subBox(extra, i);
+                leftEdge(res, extra, y, hw, ytop, ybot);
             }
         }
     }
     else
     {
-        const BBox &bb = gc.getBoundingBBox(gid);
-        const SlantBox &sb = gc.getBoundingSlantBox(gid);
-        if (sy + bb.yi - margin > y + width / 2 || sy + bb.ya + margin < y - width / 2)
+        const Box &b = _boxes[0];
+        if (b.ymin > ytop || b.ymax < ybot)
             return res;
-        float td = sx - sy + y;
-        float ts = sx + sy - y;
-        if (isRight)
-            res = localmax(td + sb.da - width / 2, td + sb.da + width / 2, ts + sb.sa - width / 2, ts + sb.sa + width / 2, sx + bb.xa) + margin;
+        float td = b.td + y;
+        float ts = b.ts - y;
+        if (_isRight)
+            res = localmax(td + _d - hw, td + _d + hw, ts + _s - hw, ts + _s + hw, b.x) + _margin;
         else
-            res = localmin(td + sb.di - width / 2, td + sb.di + width / 2, ts + sb.si - width / 2, ts + sb.si + width / 2, sx + bb.xi) - margin;
+            res = localmin(td + _d - hw, td + _d + hw, ts + _s - hw, ts + _s + hw, b.x) - _margin;
     }
     return res;
 }
+
+} // end of anonymous namespace
 
 
 bool KernCollider::initSlot(Segment *seg, Slot *aSlot, const Rect &limit, float margin,
@@ -878,13 +1005,20 @@ bool KernCollider::initSlot(Segment *seg, Slot *aSlot, const Rect &limit, float 
         float toffset = c->shift().y - _miny + 1 + s->origin().y;
         int smin = max(0, int((bs.yi + toffset) / _sliceWidth));
         int smax = min(numSlices - 1, int((bs.ya + toffset) / _sliceWidth + 1));
+        GlyphEdge edge;         // set when the first slice needs it
+        bool haveEdge = false;
         for (int i = smin; i <= smax; ++i)
         {
             float t;
             float y = _miny - 1 + (i + .5f) * _sliceWidth; // vertical center of slice
             if ((dir & 1) && x < _edges[i])
             {
-                t = get_edge(seg, s, c->shift(), y, _sliceWidth, margin, false);
+                if (!haveEdge)
+                {
+                    edge.set(gc, s, c->shift(), margin, false);
+                    haveEdge = true;
+                }
+                t = edge.at(y, _sliceWidth);
                 if (t < _edges[i])
                 {
                     _edges[i] = t;
@@ -894,7 +1028,12 @@ bool KernCollider::initSlot(Segment *seg, Slot *aSlot, const Rect &limit, float 
             }
             else if (!(dir & 1) && x > _edges[i])
             {
-                t = get_edge(seg, s, c->shift(), y, _sliceWidth, margin, true);
+                if (!haveEdge)
+                {
+                    edge.set(gc, s, c->shift(), margin, true);
+                    haveEdge = true;
+                }
+                t = edge.at(y, _sliceWidth);
                 if (t > _edges[i])
                 {
                     _edges[i] = t;
@@ -936,6 +1075,8 @@ bool KernCollider::mergeSlot(Segment *seg, Slot *slot, const Position &currShift
         return false;
     bool collides = false;
     bool nooverlap = true;
+    GlyphEdge edge;             // set when the first slice needs it
+    bool haveEdge = false;
 
     for (int i = smin; i <= smax; ++i)
     {
@@ -945,8 +1086,13 @@ bool KernCollider::mergeSlot(Segment *seg, Slot *slot, const Position &currShift
         if (!_hit || x > here - _mingap - currSpace)
         {
             float y = (float)(_miny - 1 + (i + .5f) * _sliceWidth);  // vertical center of slice
+            if (!haveEdge)
+            {
+                edge.set(seg->getFace()->glyphs(), slot, currShift, 0., rtl > 0);
+                haveEdge = true;
+            }
             // 2 * currSpace to account for the space that is already separating them and the space we want to add
-            float m = get_edge(seg, slot, currShift, y, _sliceWidth, 0., rtl > 0) * rtl + 2 * currSpace;
+            float m = edge.at(y, _sliceWidth) * rtl + 2 * currSpace;
             if (m < (float)-8e37)       // only true if the glyph has a gap in it
                 continue;
             nooverlap = false;
