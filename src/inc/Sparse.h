@@ -173,6 +173,9 @@ public:
     reader(const sparse & s, const key_type k) throw();
 
     mapped_type next() throw();
+    // Whether any of the next n keys is present, n being MAX_KEYS at most:
+    // if not, next() returns 0 for every one of them.
+    bool        any(unsigned int n) const throw();
 
 private:
     const mapped_type * m_value;    // value of the next key that is present
@@ -214,6 +217,13 @@ sparse::mapped_type sparse::reader::next() throw()
     const mask_t present = m_mask & (mask_t(1) << (SIZEOF_CHUNK - 1));
     m_mask <<= 1;
     return present ? *m_value++ : mapped_type(0);
+}
+
+inline
+bool sparse::reader::any(unsigned int n) const throw()
+{
+    // The next n keys are the top n bits of the mask's SIZEOF_CHUNK.
+    return ((m_mask & ((mask_t(1) << SIZEOF_CHUNK) - 1)) >> (SIZEOF_CHUNK - n)) != 0;
 }
 
 } // namespace graphite2

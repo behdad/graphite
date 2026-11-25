@@ -90,6 +90,7 @@ public:
     const BBox &     getSubBoundingBBox(unsigned short glyphid, uint8 subindex) const;
     bool             check(unsigned short glyphid) const;
     bool             hasBoxes() const { return _boxes != 0; }
+    bool             preloaded() const { return _glyph_loader == 0; }
 
     CLASS_NEW_DELETE;
 

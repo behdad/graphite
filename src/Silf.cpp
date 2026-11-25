@@ -18,6 +18,7 @@ namespace { static const uint32 ERROROFFSET = 0xFFFFFFFF; }
 Silf::Silf() throw()
 : m_passes(0),
   m_pseudos(0),
+  m_collAttrs(0),
   m_classOffsets(0),
   m_classData(0),
   m_justs(0),
@@ -58,6 +59,8 @@ void Silf::releaseBuffers() throw()
     free(m_classOffsets);
     free(m_classData);
     free(m_justs);
+    free(m_collAttrs);
+    m_collAttrs = 0;
     m_passes= 0;
     m_pseudos = 0;
     m_classOffsets = 0;
@@ -195,6 +198,32 @@ bool Silf::readGraphite(const byte * const silf_start, size_t lSilf, Face& face,
         {
             releaseBuffers();
             return false;
+        }
+    }
+
+    // A segment that avoids collisions reads the collision attributes of
+    // every slot's glyph (SlotCollision::initFromSlot). Gather them for all
+    // the glyphs here, once, so that it finds them side by side and need not
+    // look each of them up in the glyph's sparse attributes. That takes all
+    // the glyphs to be loaded already; a face that loads them as they are
+    // asked for gets no table and goes on looking them up, as does one for
+    // which there is no memory. The table is filled before the face is
+    // handed out and only read after that.
+    if ((m_flags & 0x20) && face.glyphs().preloaded())
+    {
+        const size_t numGlyphs = face.glyphs().numGlyphs();
+        m_collAttrs = grzeroalloc<uint16>(numGlyphs * NUM_COLL_ATTRS);
+        if (m_collAttrs)
+        {
+            uint16 * a = m_collAttrs;
+            for (size_t gid = 0; gid != numGlyphs; ++gid, a += NUM_COLL_ATTRS)
+            {
+                sparse::reader r(face.glyphs().glyph(uint16(gid))->attrs(), m_aCollision);
+                // Most glyphs have none of them, and so all zeros.
+                if (!r.any(NUM_COLL_ATTRS)) continue;
+                for (int i = 0; i != NUM_COLL_ATTRS; ++i)
+                    a[i] = r.next();
+            }
         }
     }
 

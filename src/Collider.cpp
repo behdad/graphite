@@ -1278,30 +1278,40 @@ void SlotCollision::initFromSlot(Segment *seg, Slot *slot)
 	// The order here must match the order in the grcompiler code,
 	// GrcSymbolTable::AssignInternalGlyphAttrIDs.
     uint16 gid = slot->gid();
-    uint16 aCol = seg->silf()->aCollision(); // flags attr ID
-    const GlyphFace * glyphFace = seg->getFace()->glyphs().glyphSafe(gid);
-    if (!glyphFace)
+    const GlyphCache & gc = seg->getFace()->glyphs();
+    if (gid >= gc.numGlyphs())
         return;
-    // The sixteen attributes aCol .. aCol+15, read in key order.
-    sparse::reader p(glyphFace->attrs(), aCol);
-    _flags = p.next();
-    const int16 limitblx = int16(p.next()),
-                limitbly = int16(p.next()),
-                limittrx = int16(p.next()),
-                limittry = int16(p.next());
-    _limit = Rect(Position(limitblx, limitbly), Position(limittrx, limittry));
-    _margin = p.next();
-    _marginWt = p.next();
 
-    _seqClass = p.next();
-	_seqProxClass = p.next();
-    _seqOrder = p.next();
-	_seqAboveXoff = p.next();
-	_seqAboveWt = p.next();
-	_seqBelowXlim = p.next();
-	_seqBelowWt = p.next();
-	_seqValignHt = p.next();
-	_seqValignWt = p.next();
+    // The sixteen attributes aCol .. aCol+15, in key order: from the table
+    // made with the face if there is one, otherwise from the glyph's own
+    // attributes.
+    uint16 fromGlyph[Silf::NUM_COLL_ATTRS];
+    const uint16 * p = seg->silf()->collisionAttrs(gid);
+    if (!p)
+    {
+        const GlyphFace * glyphFace = gc.glyph(gid);
+        if (!glyphFace)
+            return;
+        sparse::reader r(glyphFace->attrs(), seg->silf()->aCollision());
+        for (int i = 0; i != Silf::NUM_COLL_ATTRS; ++i)
+            fromGlyph[i] = r.next();
+        p = fromGlyph;
+    }
+    _flags = p[0];
+    _limit = Rect(Position(int16(p[1]), int16(p[2])),
+                  Position(int16(p[3]), int16(p[4])));
+    _margin = p[5];
+    _marginWt = p[6];
+
+    _seqClass = p[7];
+	_seqProxClass = p[8];
+    _seqOrder = p[9];
+	_seqAboveXoff = p[10];
+	_seqAboveWt = p[11];
+	_seqBelowXlim = p[12];
+	_seqBelowWt = p[13];
+	_seqValignHt = p[14];
+	_seqValignWt = p[15];
 
     // These attributes do not have corresponding glyph attribute:
     _exclGlyph = 0;

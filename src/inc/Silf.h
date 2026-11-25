@@ -75,6 +75,11 @@ public:
     uint8 numJustLevels() const { return m_numJusts; }
     Justinfo *justAttrs() const { return m_justs; }
     uint16 endLineGlyphid() const { return m_gEndLine; }
+    // The collision attributes of a glyph: its glyph attributes aCollision()
+    // to aCollision() + NUM_COLL_ATTRS - 1 in that order, or null if they
+    // were not gathered when the face was made.
+    enum { NUM_COLL_ATTRS = 16 };   // as many as one sparse::reader gives
+    const uint16 *collisionAttrs(uint16 gid) const { return m_collAttrs ? m_collAttrs + gid * size_t(NUM_COLL_ATTRS) : 0; }
     const gr_faceinfo *silfInfo() const { return &m_silfinfo; }
 
     CLASS_NEW_DELETE;
@@ -85,6 +90,7 @@ private:
 
     Pass          * m_passes;
     Pseudo        * m_pseudos;
+    uint16        * m_collAttrs;       // NUM_COLL_ATTRS for each glyph, or null
     uint32        * m_classOffsets;
     uint16        * m_classData;
     Justinfo      * m_justs;
