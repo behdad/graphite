@@ -1156,19 +1156,7 @@ bool Pass::testConstraint(const Rule & r, Machine & m) const
 
     if (!*r.constraint) return true;
     assert(r.constraint->constraint());
-    // A constraint cannot change the slot map, so whether the slots it refers
-    // to are there is the same for every slot it is run on. At least one is:
-    // the last was tested above.
-    if (!r.constraint->haveSlots(m)) return false;
-    for (int n = r.sort; n && map; --n, ++map)
-    {
-        if (!*map) continue;
-        const int32 ret = r.constraint->exec(m, map);
-        if (!ret || m.status() != Machine::finished)
-            return false;
-    }
-
-    return true;
+    return r.constraint->test(m, r);
 }
 
 

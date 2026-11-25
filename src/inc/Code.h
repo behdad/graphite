@@ -17,6 +17,7 @@ namespace graphite2 {
 
 class Silf;
 class Face;
+struct Rule;
 
 enum passtype {
     PASS_TYPE_UNKNOWN = 0,
@@ -60,6 +61,22 @@ private:
         BYTE_IATTR,                 // PUSH_BYTE IATTR_SET
         SLOT_BITS_ATTR              // PUSH_SLOT_ATTR BITSET ATTR_SET
     };
+    // And about a constraint that test can tell about without running it.
+    enum {
+        // SIMPLE = 1               // _simple: it is one,
+        CONTEXT_ITEM = 2,           //   all of it is in one CNTXT_ITEM,
+        VALUE_SHIFT = 2,            //   the value it tests is pushed by
+        VALUE_MASK = 3,
+        FEAT = 0,                   //     PUSH_FEAT
+        SLOT_ATTR,                  //     PUSH_SLOT_ATTR
+        ISLOT_ATTR,                 //     PUSH_ISLOT_ATTR
+        WITH_SHIFT = 4,             //   and tested as it is or compared with
+        WITH_MASK = 3,
+        NOTHING = 0,
+        BYTE,                       //     PUSH_BYTE
+        SHORT                       //     PUSH_SHORT
+        // _setters: the opcode that compares them
+    };
 
     instr *     _code;
     byte  *     _data;
@@ -78,6 +95,7 @@ private:
     void failure(const status_t) throw();
     void fuse(const opcode_t *) throw();
     void find_setters(const opcode_t *, const instr * end) throw();
+    void find_test(const opcode_t *) throw();
 
 public:
     static size_t estimateCodeDataOut(size_t num_bytecodes, int nRules, int nSlots);
@@ -105,9 +123,12 @@ public:
     int32 run(Machine &m, slotref * & map) const;
     bool  haveSlots(Machine &m) const;
     int32 exec(Machine &m, slotref * & map) const;
-    // For a simple() program, runSimple() does what exec() does.
+    // For a simple() action, runSimple() does what exec() does.
     bool  simple() const throw()                    { return _simple; }
     int32 runSimple(Machine &m, slotref * & map) const;
+    // Whether this, the constraint of the rule, holds for the slots that the
+    // slot map has for the rule: whether exec() returns true for them all.
+    bool  test(Machine &m, const Rule &) const;
 
     CLASS_NEW_DELETE;
 };

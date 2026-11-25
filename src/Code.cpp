@@ -17,6 +17,7 @@
 #include "inc/GlyphCache.h"
 #include "inc/Machine.h"
 #include "inc/Rule.h"
+#include "inc/Segment.h"
 #include "inc/Silf.h"
 
 #include <cstdio>
@@ -743,8 +744,13 @@ void Machine::Code::fuse(const opcode_t * const op) throw()
     // none is run twice, so a program this short cannot overflow the stack
     // and those tests could not fail on the upper bound; the fused
     // instructions see to the lower one themselves.
-    if (_constraint || _instr_count < 2 || _instr_count >= Machine::STACK_MAX)
+    if (_instr_count < 2 || _instr_count >= Machine::STACK_MAX)
         return;
+    if (_constraint)
+    {
+        find_test(op);
+        return;
+    }
 
     const instr attr_set  = op[ATTR_SET].impl[0],
                 iattr_set = op[IATTR_SET].impl[0],
@@ -827,6 +833,157 @@ void Machine::Code::find_setters(const opcode_t * const op, const instr * const 
     }
     _simple  = byte(simple | n << SETTERS_SHIFT);
     _setters = uint16(kinds);
+}
+
+
+// Many constraints test one value of the slot they are run on: a feature or
+// a slot attribute, as it is or compared with a constant, the whole of it
+// perhaps in a context item, which keeps the test to one slot of the rule.
+// Find out whether this is one. Code::test tests such a constraint without
+// the virtual machine.
+void Machine::Code::find_test(const opcode_t * const op) throw()
+{
+    const instr * i = _code,
+                * const last = _code + _instr_count - 1;
+    const byte  * d = _data;
+    unsigned simple = SIMPLE;
+
+    if (*last != op[POP_RET].impl[1])   return;
+    if (*i == op[CNTXT_ITEM].impl[1])
+    {
+        // Stepping over the context item must lead to the return.
+        if (d[1] != last - i - 1)   return;
+        simple |= CONTEXT_ITEM;
+        ++i; d += 3;
+    }
+
+    // The value: of the slot itself, and not its position, which would have
+    // the slots positioned first.
+    if (*i == op[PUSH_FEAT].impl[1])
+        simple |= FEAT << VALUE_SHIFT;
+    else if (*i == op[PUSH_SLOT_ATTR].impl[1] && d[0] != gr_slatPosX && d[0] != gr_slatPosY)
+        simple |= SLOT_ATTR << VALUE_SHIFT;
+    else if (*i == op[PUSH_ISLOT_ATTR].impl[1] && d[0] != gr_slatPosX && d[0] != gr_slatPosY)
+        simple |= ISLOT_ATTR << VALUE_SHIFT;
+    else
+        return;
+    if (d[1] != 0)  return;
+
+    opcode compare = NOP;
+    if (++i != last)
+    {
+        if (*i == op[PUSH_BYTE].impl[1])
+            simple |= BYTE << WITH_SHIFT;
+        else if (*i == op[PUSH_SHORT].impl[1])
+            simple |= SHORT << WITH_SHIFT;
+        else
+            return;
+        if (++i == last)    return;
+        for (compare = EQUAL; *i != op[compare].impl[1]; compare = opcode(compare + 1))
+            if (compare == GTR_EQ)  return;
+        if (++i != last)    return;
+    }
+    _simple  = byte(simple);
+    _setters = uint16(compare);
+}
+
+
+// Whether this, the constraint of the rule, holds for the slots of the rule:
+// whether, run on each of them that is not null, it returns true. (That the
+// slot map holds them, Pass::testConstraint has made sure.)
+bool Machine::Code::test(Machine & m, const Rule & rule) const
+{
+    // A constraint cannot change the slot map, so whether the slots it refers
+    // to are there is the same for every slot it is run on. At least one is:
+    // the rule's last, which Pass::testConstraint has looked at.
+    if (!haveSlots(m))  return false;
+
+    SlotMap     & smap = m.slotMap();
+    slotref      * map = &smap[smap.context() - rule.preContext];
+    int      num_slots = rule.sort;
+    if (!_simple)
+    {
+        for (; num_slots; --num_slots, ++map)
+        {
+            if (!*map) continue;
+            const int32 ret = exec(m, map);
+            if (!ret || m.status() != Machine::finished)
+                return false;
+        }
+        return true;
+    }
+
+    // A simple() constraint (see find_test) is not run. The value it tests
+    // is one of the slot the program is run on, which is not null, so it is
+    // always pushed, and nothing the program does can fail or change
+    // anything: what it returns is all there is to it. That includes the
+    // machine's slotat(), which refuses a slot offset that leads outside the
+    // slot map: the only offset here is 0, from an entry of one of the
+    // rule's slots, and those entries are all inside the map (see above).
+    const Segment & seg = smap.segment;
+    const byte     * dp = _data;
+    if (_simple & CONTEXT_ITEM)
+    {
+        // Run on any slot but the one it names, a context item is stepped
+        // over and true pushed in its place, which the program then returns.
+        const int n = int8(dp[0]) + rule.preContext;
+        if (n < 0 || n >= num_slots)    return true;
+        map += n;
+        num_slots = 1;
+        dp += 3;
+    }
+
+    const unsigned value = _simple >> VALUE_SHIFT & VALUE_MASK,
+                   with  = _simple >> WITH_SHIFT & WITH_MASK;
+    for (; num_slots; --num_slots, ++map)
+    {
+        assert(map >= smap.begin() && map < smap.end());
+        const Slot * const slot = *map;
+        if (!slot)  continue;
+
+        const byte * param = dp;
+        int32 val;
+        if (value == FEAT)                  // push_feat
+        {
+            const uint8 fid = seg.charinfo(slot->original())->fid();
+            val = seg.getFeature(fid, uint8(param[0]));
+            param += 2;
+        }
+        else if (value == SLOT_ATTR)        // push_slot_attr
+        {
+            val = slot->getAttr(&seg, attrCode(uint8(param[0])), 0);
+            param += 2;
+        }
+        else                                // push_islot_attr
+        {
+            val = slot->getAttr(&seg, attrCode(uint8(param[0])), uint8(param[2]));
+            param += 3;
+        }
+
+        if (with != NOTHING)
+        {
+            int32 c;
+            if (with == BYTE)               // push_byte
+                c = int8(param[0]);
+            else                            // push_short
+            {
+                const int16 r   = int16(param[0]) << 8
+                                | uint8(param[1]);
+                c = r;
+            }
+            switch (_setters)
+            {
+            case EQUAL :    val = uint32(val) == uint32(c); break;
+            case NOT_EQ :   val = uint32(val) != uint32(c); break;
+            case LESS :     val = val <  c; break;
+            case GTR :      val = val >  c; break;
+            case LESS_EQ :  val = val <= c; break;
+            default :       val = val >= c; break;      // GTR_EQ
+            }
+        }
+        if (!val)   return false;
+    }
+    return true;
 }
 
 
