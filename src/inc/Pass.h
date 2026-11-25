@@ -52,6 +52,8 @@ private:
     bool    couldMatch(const Slot * slot) const;
     uint16  glyphToCol(const uint16 gid) const;
     bool    runFSM(FiniteStateMachine & fsm, Slot * slot) const;
+    bool    runAtCursor(FiniteStateMachine & fsm, Slot * cursor) const;
+    bool    runFrom(FiniteStateMachine & fsm, Slot * slot, unsigned int state, Slot * * free) const;
     void    dumpRuleEventConsidered(const FiniteStateMachine & fsm, const RuleEntry & re) const;
     void    dumpRuleEventOutput(const FiniteStateMachine & fsm, const Rule & r, Slot * os) const;
     void    adjustSlot(int delta, Slot * & slot_out, SlotMap &) const;
@@ -74,6 +76,7 @@ private:
     byte              * m_progs;
     byte              * m_filter;       // per glyph: whether a rule can match with it at the cursor
     uint32            * m_filterPairs;  // per column: the columns that can come next in a match
+    byte              * m_context;      // per glyph: whether a run can do without the slots before the cursor
 
     byte   m_numCollRuns;
     byte   m_kernColls;
@@ -86,6 +89,7 @@ private:
     uint16 m_successStart;
     uint16 m_numColumns;
     uint16 m_filterWords;
+    uint16 m_atCursor;      // a state the machine can be in at the cursor
     byte m_minPreCtxt;
     byte m_maxPreCtxt;
     byte m_colThreshold;

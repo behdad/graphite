@@ -39,6 +39,7 @@ Pass::Pass()
   m_progs(0),
   m_filter(0),
   m_filterPairs(0),
+  m_context(0),
   m_numCollRuns(0),
   m_kernColls(0),
   m_iMaxLoop(0),
@@ -50,6 +51,7 @@ Pass::Pass()
   m_successStart(0),
   m_numColumns(0),
   m_filterWords(0),
+  m_atCursor(0),
   m_minPreCtxt(0),
   m_maxPreCtxt(0),
   m_colThreshold(0),
@@ -70,6 +72,7 @@ Pass::~Pass()
     free(m_progs);
     free(m_filter);
     free(m_filterPairs);
+    free(m_context);
 }
 
 bool Pass::readPass(const byte * const pass_start, size_t pass_length, size_t subtable_base,
@@ -428,16 +431,33 @@ inline void scanRow(const uint16 * const row, const uint16 * const ref, const si
         if (*p != p[d]) visit(p - row, *p);
 }
 
+// What a column can do, as bits. At the cursor:
+enum { CAN_GO_ON = 1,   // lead to a state that has transitions,
+       CAN_MATCH = 2,   // lead to a state that has rules,
+       CAN_VARY  = 4,   // lead to one state or another, going by what came before.
+       CAN_STOP  = 8 }; // Before the cursor: end the run.
+
+// What m_filter says of a glyph at the cursor.
+enum { FILTER_CAN = 1,      // a rule can match
+       FILTER_ALONE = 2 };  // and whatever glyph follows
+
+// What m_context says of a glyph, as bits.
+enum { CONTEXT_SAFE    = 1,     // before the cursor: the run is sure to go on;
+       CONTEXT_UNIFORM = 2 };   // at the cursor: it makes no difference which state the machine comes in.
+
 // Collects the different states that entries of a transition table lead
-// to, less state 0, which ends a run.
+// to, less state 0, which ends a run, and notes the columns that lead to
+// states with no way on.
 class Targets
 {
 public:
     // seen: a zeroed byte per state; list: room for every state.
-    Targets(byte * seen, uint16 * list) : m_seen(seen), m_list(list), m_size(0) { if (seen) seen[0] = 1; }
+    Targets(byte * seen, uint16 * list, byte * can, size_t numTrans)
+    : m_seen(seen), m_list(list), m_can(can), m_numTrans(numTrans), m_size(0) { if (seen) seen[0] = 1; }
 
-    void operator () (size_t, const uint16 state)
+    void operator () (const size_t col, const uint16 state)
     {
+        if (state == 0 || state >= m_numTrans) m_can[col] |= CAN_STOP;
         if (m_seen[state]) return;
         m_seen[state] = 1;
         m_list[m_size++] = state;
@@ -449,16 +469,10 @@ public:
 private:
     byte   * m_seen;
     uint16 * m_list;
+    byte   * m_can;
+    const size_t m_numTrans;
     size_t   m_size;
 };
-
-// What a column can do at the cursor.
-enum { CAN_GO_ON = 1,   // lead to a state that has transitions
-       CAN_MATCH = 2 }; // lead to a state that has rules
-
-// What m_filter says of a glyph at the cursor.
-enum { FILTER_CAN = 1,      // a rule can match
-       FILTER_ALONE = 2 };  // and whatever glyph follows
 
 // Notes what each column can do at the cursor, and each transition state a
 // column leads to there.
@@ -470,10 +484,11 @@ public:
     // can and last: a zeroed entry per column; steps: room for as many as are added before clear().
     Columns(byte * can, uint16 * last, Step * steps, const State * states, size_t successStart, size_t numTrans)
     : m_can(can), m_last(last), m_steps(steps), m_states(states),
-      m_successStart(successStart), m_numTrans(numTrans), m_size(0) {}
+      m_successStart(successStart), m_numTrans(numTrans), m_size(0), m_vary(0) {}
 
     void operator () (const size_t col, const uint16 state)
     {
+        m_can[col] |= m_vary;
         if (state >= m_successStart && !m_states[state].empty())
             m_can[col] |= CAN_MATCH;
         if (state == 0 || state >= m_numTrans || state == m_last[col]) return;
@@ -482,6 +497,8 @@ public:
         m_steps[m_size].col = uint16(col);
         m_steps[m_size++].state = state;
     }
+    // From now on an entry seen is one that another state does not have.
+    void varying()                              { m_vary = CAN_VARY; }
     size_t size() const                         { return m_size; }
     const Step & operator [] (size_t i) const   { return m_steps[i]; }
     void clear()                                { m_size = 0; }
@@ -494,6 +511,7 @@ private:
     const size_t  m_successStart,
                   m_numTrans;
     size_t        m_size;
+    byte          m_vary;
 };
 
 } // end of namespace
@@ -516,6 +534,18 @@ private:
 // table in which rules turn up before the cursor is reached, or where the
 // sets take too long to follow) gets none.
 //
+// The same sets tell runFSM() when it need not work its way to the cursor.
+// For most glyphs it makes no difference to the transition at the cursor
+// which of the states the machine arrives in (CONTEXT_UNIFORM): no rule that
+// could match there minds what came before. If, besides, each of the slots
+// before the cursor has a glyph that takes every state the machine can be in
+// at that slot to another state with transitions (CONTEXT_SAFE), the run is
+// certain to get to the cursor in one of those states, and runFSM() can
+// start there in any of them: m_atCursor.
+//
+// All of this takes the slots to be linked consistently, so that going back
+// from the cursor and forward again comes to the cursor.
+//
 // ranges is what readRanges() has checked and read m_cols from.
 bool Pass::buildFilter(const byte * ranges, size_t num_ranges, Face & face, Error &e)
 {
@@ -528,7 +558,11 @@ bool Pass::buildFilter(const byte * ranges, size_t num_ranges, Face & face, Erro
                  maxSteps = numCols + m_numStates;
     // The rows are no use for a table with next to no states, and must not
     // take more room than the table they are made from.
-    const bool   pairs    = 2 * rowWords <= numTrans;
+    const bool   pairs    = 2 * rowWords <= numTrans,
+    // Whether there is enough before the cursor for runFSM() to gain by
+    // leaving it out, which takes some doing itself, and room in the slot
+    // map to do it without counting slots.
+                 shortcut = m_maxPreCtxt > 2 && m_maxPreCtxt < SlotMap::MAX_SLOTS - 1;
     const uint16 * const transitions = m_transitions;
     const State  * const states = m_states;
     const uint16 successStart = m_successStart;
@@ -540,7 +574,7 @@ bool Pass::buildFilter(const byte * ranges, size_t num_ranges, Face & face, Erro
 
     // sets:   two sets of transition states, one before a slot and one after;
     // seen, list: for the different states the rows of one of the sets lead to;
-    // can, last, steps: for what the columns lead to at the cursor;
+    // can, last, steps: for what the columns lead to, at the cursor and before;
     // next:   for each transition state entered at the cursor, in the order
     //         they turn up, its row as the set of columns it goes on with;
     // nextOf: which of those sets is a state's.
@@ -553,6 +587,8 @@ bool Pass::buildFilter(const byte * ranges, size_t num_ranges, Face & face, Erro
     uint32 * const next   = pairs ? gralloc<uint32>(numTrans * rowWords) : 0;
     uint16 * const nextOf = gralloc<uint16>(numTrans);
     byte   * const filter = grzeroalloc<byte>(m_numGlyphs);
+    byte   * const context = shortcut ? grzeroalloc<byte>(m_numGlyphs + numCols) : 0,
+           * const before = context ? context + m_numGlyphs : 0;    // the same, per column
     uint32 * const filterPairs = pairs ? grzeroalloc<uint32>(numCols * rowWords) : 0;
 
     // Rows of the transition table we are prepared to look at; an operation
@@ -561,13 +597,13 @@ bool Pass::buildFilter(const byte * ranges, size_t num_ranges, Face & face, Erro
            merged  = 0,
            numNext = 0;
     bool   usable  = sets && seen && list && can && last && steps && nextOf && filter
-                        && (!pairs || (next && filterPairs));
+                        && (!pairs || (next && filterPairs)) && (!shortcut || context);
     const bool nomem = !usable;
 
     uint32 * cur = sets, * nxt = sets + setWords;
 
     // The states the machine can be in at each slot before the cursor.
-    Targets targets(seen, list);
+    Targets targets(seen, list, can, numTrans);
     for (int k = m_maxPreCtxt; usable; --k)
     {
         // A run that has k slots before the cursor starts here.
@@ -603,6 +639,7 @@ bool Pass::buildFilter(const byte * ranges, size_t num_ranges, Face & face, Erro
     Columns columns(can, last, steps, states, successStart, numTrans);
     const uint16 * ref = 0;
     size_t s = usable ? nextBit(cur, 0, numTrans) : numTrans;
+    const size_t atCursor = s;
     if (usable) memset(nxt, 0, setWords * sizeof(uint32));
     while (usable && (s != numTrans || columns.size()))
     {
@@ -611,6 +648,7 @@ bool Pass::buildFilter(const byte * ranges, size_t num_ranges, Face & face, Erro
             if (budget-- == 0) { usable = false; break; }
             const uint16 * const row = transitions + s * numCols;
             scanRow(row, ref, numCols, columns);
+            columns.varying();
             ref = row;
         }
         for (size_t i = 0; pairs && i != columns.size() && usable; ++i)
@@ -657,19 +695,34 @@ bool Pass::buildFilter(const byte * ranges, size_t num_ranges, Face & face, Erro
         columns.clear();
     }
 
-    bool worthwhile = false, pairsWorthwhile = false;
-    for (size_t c = 0; pairs && c != numCols && usable; ++c)
+    // What m_filter and m_context are to say of the glyphs of each column.
+    bool worthwhile = false, pairsWorthwhile = false, contextWorthwhile = false;
+    for (size_t c = 0; c != numCols && usable; ++c)
     {
-        uint32 * const pair = filterPairs + c * rowWords;
-        if (can[c] & CAN_MATCH)
-            memset(pair, 0xFF, rowWords * sizeof(uint32));
-        else if (can[c])
+        if (shortcut && atCursor != numTrans)
         {
-            can[c] = 0;
-            for (size_t j = 0; j != rowWords && !can[c]; ++j)
-                can[c] = pair[j] != 0;
-            pairsWorthwhile |= can[c];
+            if (!(can[c] & CAN_STOP)) before[c] = CONTEXT_SAFE;
+            if (!(can[c] & CAN_VARY))
+            {
+                before[c] |= CONTEXT_UNIFORM;
+                contextWorthwhile = true;
+            }
         }
+        int flags = 0;
+        if (can[c] & CAN_MATCH)
+        {
+            flags = FILTER_CAN | FILTER_ALONE;
+            if (pairs) memset(filterPairs + c * rowWords, 0xFF, rowWords * sizeof(uint32));
+        }
+        else if (can[c] & CAN_GO_ON)
+        {
+            bool follows = !pairs;
+            for (size_t j = 0; j != rowWords && !follows; ++j)
+                follows = filterPairs[c * rowWords + j] != 0;
+            if (follows) flags = FILTER_CAN;
+            pairsWorthwhile |= pairs && follows;
+        }
+        can[c] = byte(flags);
     }
 
     if (usable)
@@ -680,8 +733,10 @@ bool Pass::buildFilter(const byte * ranges, size_t num_ranges, Face & face, Erro
             const size_t first = be::read<uint16>(ranges),
                          end   = be::read<uint16>(ranges) + 1,
                          col   = be::read<uint16>(ranges);
+            if (contextWorthwhile && before[col])
+                memset(context + first, before[col], end - first);
             if (!can[col]) continue;
-            memset(filter + first, FILTER_CAN | (can[col] & CAN_MATCH ? FILTER_ALONE : 0), end - first);
+            memset(filter + first, can[col], end - first);
             n += end - first;
         }
         worthwhile = n != m_numGlyphs;
@@ -706,6 +761,13 @@ bool Pass::buildFilter(const byte * ranges, size_t num_ranges, Face & face, Erro
         m_filter = filter;
     else
         free(filter);
+    if (usable && contextWorthwhile)
+    {
+        m_context = context;
+        m_atCursor = uint16(atCursor);
+    }
+    else
+        free(context);
     if (e.test(nomem, E_OUTOFMEM)) return face.error(e);
     return true;
 }
@@ -809,12 +871,11 @@ bool Pass::runGraphite(vm::Machine & m, FiniteStateMachine & fsm, bool reverse) 
     return true;
 }
 
-bool Pass::runFSM(FiniteStateMachine& fsm, Slot * slot) const
+// Runs the state machine from slot on, in state, with the slots before it
+// already in the map up to free.
+inline
+bool Pass::runFrom(FiniteStateMachine & fsm, Slot * slot, unsigned int state, Slot * * free) const
 {
-    fsm.reset(slot, m_maxPreCtxt);
-    if (fsm.slots.context() < m_minPreCtxt)
-        return false;
-
     // Nothing here changes the tables: read what the loop needs once.
     const uint16 * const cols        = m_cols,
                  * const transitions = m_transitions;
@@ -823,11 +884,9 @@ bool Pass::runFSM(FiniteStateMachine& fsm, Slot * slot) const
                        numTransition = m_numTransition,
                        numColumns    = m_numColumns,
                        successStart  = m_successStart;
-    unsigned int state = m_startStates[m_maxPreCtxt - fsm.slots.context()];
     // The slots go into the map from its start; there is room for MAX_SLOTS.
     Slot * * const map = fsm.slots.begin(),
-         * * const end = map + SlotMap::MAX_SLOTS,
-         * * free = map;
+         * * const end = map + SlotMap::MAX_SLOTS;
     // A state without transitions ends the run once one more slot is in
     // the map. As m_successStart is not above m_numTransition, only a start
     // state or a success state can be one, and never state 0 once in the
@@ -877,6 +936,57 @@ bool Pass::runFSM(FiniteStateMachine& fsm, Slot * slot) const
 
     fsm.slots.size(free - map);
     return true;
+}
+
+// runFSM() for a slot whose glyph has CONTEXT_UNIFORM: buildFilter() has
+// found that it leads to the same state from all the states the machine can
+// reach the cursor in. If the glyphs before it are ones that are sure to
+// take the machine there, the run can start at the cursor, in m_atCursor,
+// with the slots before it in the map just as the run through them would
+// leave them.
+bool Pass::runAtCursor(FiniteStateMachine & fsm, Slot * const cursor) const
+{
+    // Going back, the slots are put into the map so that the last of them
+    // ends where it would if there were m_maxPreCtxt of them, and moved down
+    // if there are fewer.
+    const byte * const context = m_context;
+    const unsigned int numGlyphs = m_numGlyphs;
+    Slot * slot = cursor;
+    Slot * * const map = fsm.slots.begin(),
+         * * const last = map + m_maxPreCtxt,
+         * * place = last;
+    bool safe = true;
+    while (place != map && slot->prev())
+    {
+        slot = slot->prev();
+        *--place = slot;
+        const unsigned int gid = slot->gid();
+        if (gid >= numGlyphs || !(context[gid] & CONTEXT_SAFE))
+            safe = false;
+    }
+    const unsigned int ctxt = (unsigned int)(last - place);
+    if (place != map)
+        for (Slot * * to = map; place != last; ) *to++ = *place++;
+    fsm.rules.clear();
+    fsm.slots.reset(*slot, (unsigned short)(ctxt));
+    if (ctxt < m_minPreCtxt)
+        return false;
+    const unsigned int state = m_startStates[m_maxPreCtxt - ctxt];
+    if (safe && state < m_numTransition)
+        return runFrom(fsm, cursor, m_atCursor, map + ctxt);
+    return runFrom(fsm, slot, state, map);
+}
+
+bool Pass::runFSM(FiniteStateMachine& fsm, Slot * slot) const
+{
+    const byte * const context = m_context;
+    if (context && slot->gid() < m_numGlyphs && (context[slot->gid()] & CONTEXT_UNIFORM))
+        return runAtCursor(fsm, slot);
+
+    fsm.reset(slot, m_maxPreCtxt);
+    if (fsm.slots.context() < m_minPreCtxt)
+        return false;
+    return runFrom(fsm, slot, m_startStates[m_maxPreCtxt - fsm.slots.context()], fsm.slots.begin());
 }
 
 #if !defined GRAPHITE2_NTRACING
