@@ -28,6 +28,18 @@
 //    push(n)           Push the value n onto the stack.
 //    pop()             Pop the top most value and return it.
 //
+//    Every instruction body ends with one of four terminators. They all stop
+//    the program when the stack pointer has left the stack, that is unless
+//    0 <= sp - sb < STACK_MAX, which holds when an instruction starts. They
+//    differ in how much of that an instruction can have broken:
+//    ENDOP             Tests both bounds.
+//    ENDOP_SAME        For an instruction that leaves sp where it was: there
+//                      is nothing to test.
+//    ENDOP_PUSH        For an instruction that pushes at most one value more
+//                      than it pops: only the upper bound needs testing.
+//    ENDOP_POP         For an instruction that never leaves sp higher than
+//                      it found it: only the lower bound needs testing.
+//
 //    You have access to the following named fast 'registers':
 //        sp        = The pointer to the current top of stack, the last value
 //                    pushed.
@@ -60,31 +72,31 @@
 
 STARTOP(nop)
     do {} while (0);
-ENDOP
+ENDOP_SAME
 
 STARTOP(push_byte)
     declare_params(1);
     push(int8(*param));
-ENDOP
+ENDOP_PUSH
 
 STARTOP(push_byte_u)
     declare_params(1);
     push(uint8(*param));
-ENDOP
+ENDOP_PUSH
 
 STARTOP(push_short)
     declare_params(2);
     const int16 r   = int16(param[0]) << 8
                     | uint8(param[1]);
     push(r);
-ENDOP
+ENDOP_PUSH
 
 STARTOP(push_short_u)
     declare_params(2);
     const uint16 r  = uint16(param[0]) << 8
                     | uint8(param[1]);
     push(r);
-ENDOP
+ENDOP_PUSH
 
 STARTOP(push_long)
     declare_params(4);
@@ -93,89 +105,89 @@ STARTOP(push_long)
                     | uint32(param[2]) << 8
                     | uint8(param[3]);
     push(r);
-ENDOP
+ENDOP_PUSH
 
 STARTOP(add)
     binop(+);
-ENDOP
+ENDOP_POP
 
 STARTOP(sub)
     binop(-);
-ENDOP
+ENDOP_POP
 
 STARTOP(mul)
     binop(*);
-ENDOP
+ENDOP_POP
 
 STARTOP(div_)
     const int32 b = pop();
     const int32 a = int32(*sp);
     if (b == 0 || (a == std::numeric_limits<int32>::min() && b == -1)) DIE;
     *sp = int32(*sp) / b;
-ENDOP
+ENDOP_POP
 
 STARTOP(min_)
     const int32 a = pop(), b = *sp;
     if (a < b) *sp = a;
-ENDOP
+ENDOP_POP
 
 STARTOP(max_)
     const int32 a = pop(), b = *sp;
     if (a > b) *sp = a;
-ENDOP
+ENDOP_POP
 
 STARTOP(neg)
     *sp = uint32(-int32(*sp));
-ENDOP
+ENDOP_SAME
 
 STARTOP(trunc8)
     *sp = uint8(*sp);
-ENDOP
+ENDOP_SAME
 
 STARTOP(trunc16)
     *sp = uint16(*sp);
-ENDOP
+ENDOP_SAME
 
 STARTOP(cond)
     const uint32 f = pop(), t = pop(), c = pop();
     push(c ? t : f);
-ENDOP
+ENDOP_POP
 
 STARTOP(and_)
     binop(&&);
-ENDOP
+ENDOP_POP
 
 STARTOP(or_)
     binop(||);
-ENDOP
+ENDOP_POP
 
 STARTOP(not_)
     *sp = !*sp;
-ENDOP
+ENDOP_SAME
 
 STARTOP(equal)
     binop(==);
-ENDOP
+ENDOP_POP
 
 STARTOP(not_eq_)
     binop(!=);
-ENDOP
+ENDOP_POP
 
 STARTOP(less)
     sbinop(<);
-ENDOP
+ENDOP_POP
 
 STARTOP(gtr)
     sbinop(>);
-ENDOP
+ENDOP_POP
 
 STARTOP(less_eq)
     sbinop(<=);
-ENDOP
+ENDOP_POP
 
 STARTOP(gtr_eq)
     sbinop(>=);
-ENDOP
+ENDOP_POP
 
 STARTOP(next)
     if (map - &smap[0] >= int(smap.size())) DIE
@@ -186,7 +198,7 @@ STARTOP(next)
         is = is->next();
     }
     ++map;
-ENDOP
+ENDOP_SAME
 
 //STARTOP(next_n)
 //    use_params(1);
@@ -204,7 +216,7 @@ STARTOP(put_glyph_8bit_obs)
     declare_params(1);
     const unsigned int output_class = uint8(*param);
     is->setGlyph(&seg, seg.getClassGlyph(output_class, 0));
-ENDOP
+ENDOP_SAME
 
 STARTOP(put_subs_8bit_obs)
     declare_params(3);
@@ -218,7 +230,7 @@ STARTOP(put_subs_8bit_obs)
         index = seg.findClassIndex(input_class, slot->gid());
         is->setGlyph(&seg, seg.getClassGlyph(output_class, index));
     }
-ENDOP
+ENDOP_SAME
 
 STARTOP(put_copy)
     declare_params(1);
@@ -245,7 +257,7 @@ STARTOP(put_copy)
         is->markCopied(false);
         is->markDeleted(false);
     }
-ENDOP
+ENDOP_SAME
 
 STARTOP(insert)
     if (smap.decMax() <= 0) DIE;
@@ -302,7 +314,7 @@ STARTOP(insert)
     seg.extendLength(1);
     if (map != &smap[-1])
         --map;
-ENDOP
+ENDOP_SAME
 
 STARTOP(delete_)
     if (!is || is->isDeleted()) DIE
@@ -323,7 +335,7 @@ STARTOP(delete_)
     if (is->prev())
         is = is->prev();
     seg.extendLength(-1);
-ENDOP
+ENDOP_SAME
 
 STARTOP(assoc)
     declare_params(1);
@@ -345,7 +357,7 @@ STARTOP(assoc)
         is->before(min);
         is->after(max);
     }
-ENDOP
+ENDOP_SAME
 
 STARTOP(cntxt_item)
     // It turns out this is a cunningly disguised condition forward jump.
@@ -360,14 +372,14 @@ STARTOP(cntxt_item)
         dp += dskip;
         push(true);
     }
-ENDOP
+ENDOP_PUSH
 
 STARTOP(attr_set)
     declare_params(1);
     const attrCode      slat = attrCode(uint8(*param));
     const          int  val  = pop();
     is->setAttr(&seg, slat, 0, val, smap);
-ENDOP
+ENDOP_POP
 
 STARTOP(attr_add)
     declare_params(1);
@@ -380,7 +392,7 @@ STARTOP(attr_add)
     }
     uint32_t res = uint32_t(is->getAttr(&seg, slat, 0));
     is->setAttr(&seg, slat, 0, int32_t(val + res), smap);
-ENDOP
+ENDOP_POP
 
 STARTOP(attr_sub)
     declare_params(1);
@@ -393,7 +405,7 @@ STARTOP(attr_sub)
     }
     uint32_t res = uint32_t(is->getAttr(&seg, slat, 0));
     is->setAttr(&seg, slat, 0, int32_t(res - val), smap);
-ENDOP
+ENDOP_POP
 
 STARTOP(attr_set_slot)
     declare_params(1);
@@ -401,7 +413,7 @@ STARTOP(attr_set_slot)
     const int       offset = int(map - smap.begin())*int(slat == gr_slatAttTo);
     const int       val    = pop()  + offset;
     is->setAttr(&seg, slat, offset, val, smap);
-ENDOP
+ENDOP_POP
 
 STARTOP(iattr_set_slot)
     declare_params(2);
@@ -409,7 +421,7 @@ STARTOP(iattr_set_slot)
     const uint8     idx  = uint8(param[1]);
     const int       val  = int(pop()  + (map - smap.begin())*int(slat == gr_slatAttTo));
     is->setAttr(&seg, slat, idx, val, smap);
-ENDOP
+ENDOP_POP
 
 STARTOP(push_slot_attr)
     declare_params(2);
@@ -426,7 +438,7 @@ STARTOP(push_slot_attr)
         int res = slot->getAttr(&seg, slat, 0);
         push(res);
     }
-ENDOP
+ENDOP_PUSH
 
 STARTOP(push_glyph_attr_obs)
     declare_params(2);
@@ -435,7 +447,7 @@ STARTOP(push_glyph_attr_obs)
     slotref slot = slotat(slot_ref);
     if (slot)
         push(int32(seg.glyphAttr(slot->gid(), glyph_attr)));
-ENDOP
+ENDOP_PUSH
 
 STARTOP(push_glyph_metric)
     declare_params(3);
@@ -445,7 +457,7 @@ STARTOP(push_glyph_metric)
     slotref slot = slotat(slot_ref);
     if (slot)
         push(seg.getGlyphMetric(slot, glyph_attr, attr_level, dir));
-ENDOP
+ENDOP_PUSH
 
 STARTOP(push_feat)
     declare_params(2);
@@ -457,7 +469,7 @@ STARTOP(push_feat)
         uint8 fid = seg.charinfo(slot->original())->fid();
         push(seg.getFeature(fid, feat));
     }
-ENDOP
+ENDOP_PUSH
 
 STARTOP(push_att_to_gattr_obs)
     declare_params(2);
@@ -470,7 +482,7 @@ STARTOP(push_att_to_gattr_obs)
         if (att) slot = att;
         push(int32(seg.glyphAttr(slot->gid(), glyph_attr)));
     }
-ENDOP
+ENDOP_PUSH
 
 STARTOP(push_att_to_glyph_metric)
     declare_params(3);
@@ -484,7 +496,7 @@ STARTOP(push_att_to_glyph_metric)
         if (att) slot = att;
         push(int32(seg.getGlyphMetric(slot, glyph_attr, attr_level, dir)));
     }
-ENDOP
+ENDOP_PUSH
 
 STARTOP(push_islot_attr)
     declare_params(3);
@@ -502,7 +514,7 @@ STARTOP(push_islot_attr)
         int res = slot->getAttr(&seg, slat, idx);
         push(res);
     }
-ENDOP
+ENDOP_PUSH
 
 #if 0
 STARTOP(push_iglyph_attr) // not implemented
@@ -529,7 +541,7 @@ STARTOP(iattr_set)
     const uint8         idx  = uint8(param[1]);
     const          int  val  = pop();
     is->setAttr(&seg, slat, idx, val, smap);
-ENDOP
+ENDOP_POP
 
 STARTOP(iattr_add)
     declare_params(2);
@@ -543,7 +555,7 @@ STARTOP(iattr_add)
     }
     uint32_t res = uint32_t(is->getAttr(&seg, slat, idx));
     is->setAttr(&seg, slat, idx, int32_t(val + res), smap);
-ENDOP
+ENDOP_POP
 
 STARTOP(iattr_sub)
     declare_params(2);
@@ -557,16 +569,16 @@ STARTOP(iattr_sub)
     }
     uint32_t res = uint32_t(is->getAttr(&seg, slat, idx));
     is->setAttr(&seg, slat, idx, int32_t(res - val), smap);
-ENDOP
+ENDOP_POP
 
 STARTOP(push_proc_state)
     use_params(1);
     push(1);
-ENDOP
+ENDOP_PUSH
 
 STARTOP(push_version)
     push(0x00030000);
-ENDOP
+ENDOP_PUSH
 
 STARTOP(put_subs)
     declare_params(5);
@@ -581,7 +593,7 @@ STARTOP(put_subs)
         int index = seg.findClassIndex(input_class, slot->gid());
         is->setGlyph(&seg, seg.getClassGlyph(output_class, index));
     }
-ENDOP
+ENDOP_SAME
 
 #if 0
 STARTOP(put_subs2) // not implemented
@@ -598,7 +610,7 @@ STARTOP(put_glyph)
     const unsigned int output_class  = uint8(param[0]) << 8
                                      | uint8(param[1]);
     is->setGlyph(&seg, seg.getClassGlyph(output_class, 0));
-ENDOP
+ENDOP_SAME
 
 STARTOP(push_glyph_attr)
     declare_params(3);
@@ -608,7 +620,7 @@ STARTOP(push_glyph_attr)
     slotref slot = slotat(slot_ref);
     if (slot)
         push(int32(seg.glyphAttr(slot->gid(), glyph_attr)));
-ENDOP
+ENDOP_PUSH
 
 STARTOP(push_att_to_glyph_attr)
     declare_params(3);
@@ -622,7 +634,7 @@ STARTOP(push_att_to_glyph_attr)
         if (att) slot = att;
         push(int32(seg.glyphAttr(slot->gid(), glyph_attr)));
     }
-ENDOP
+ENDOP_PUSH
 
 STARTOP(temp_copy)
     slotref newSlot = seg.newSlot();
@@ -633,19 +645,19 @@ STARTOP(temp_copy)
     newSlot->userAttrs(tempUserAttrs);
     newSlot->markCopied(true);
     *map = newSlot;
-ENDOP
+ENDOP_SAME
 
 STARTOP(band)
     binop(&);
-ENDOP
+ENDOP_POP
 
 STARTOP(bor)
     binop(|);
-ENDOP
+ENDOP_POP
 
 STARTOP(bnot)
     *sp = ~*sp;
-ENDOP
+ENDOP_SAME
 
 STARTOP(setbits)
     declare_params(4);
@@ -654,7 +666,7 @@ STARTOP(setbits)
     const uint16 v  = uint16(param[2]) << 8
                     | uint8(param[3]);
     *sp = ((*sp) & ~m) | v;
-ENDOP
+ENDOP_SAME
 
 STARTOP(set_feat)
     declare_params(2);
@@ -666,4 +678,4 @@ STARTOP(set_feat)
         uint8 fid = seg.charinfo(slot->original())->fid();
         seg.setFeature(fid, feat, pop());
     }
-ENDOP
+ENDOP_POP

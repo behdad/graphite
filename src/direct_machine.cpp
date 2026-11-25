@@ -23,6 +23,9 @@
 
 #define STARTOP(name)           name: {
 #define ENDOP                   }; goto *((sp - sb)/Machine::STACK_MAX ? &&end : *++ip);
+#define ENDOP_SAME              }; goto **++ip;
+#define ENDOP_PUSH              }; goto *(sp >= sl ? &&end : *++ip);
+#define ENDOP_POP               }; goto *(sp < sb ? &&end : *++ip);
 #define EXIT(status)            { push(status); goto end; }
 
 #define do_(name)               &&name
@@ -72,7 +75,8 @@ const void * direct_run(const bool          get_table_mode,
     const instr           * ip = program;
     const byte            * dp = data;
     Machine::stack_t      * sp = stack + Machine::STACK_GUARD,
-                    * const sb = sp;
+                    * const sb = sp,
+                    * const sl = sb + Machine::STACK_MAX;
     SlotMap             & smap = *__smap;
     Segment              & seg = smap.segment;
     slotref                 is = *__map,
