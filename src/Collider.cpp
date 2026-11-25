@@ -335,9 +335,6 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
         const SlantBox &sb = gc.getBoundingSlantBox(gid);
         const BBox &tbb = _tbb;
         const SlantBox &tsb = _tsb;
-        float seq_above_wt = cslot->seqAboveWt();
-        float seq_below_wt = cslot->seqBelowWt();
-        float seq_valign_wt = cslot->seqValignWt();
         // if isAfter, invert orderFlags for diagonal orders.
         if (isAfter)
         {
@@ -345,6 +342,14 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
             orderFlags ^= (sameClass ? 0x3F : 0x3);
             // consider 2 bits at a time, non overlapping. If both bits set, clear them
             orderFlags = orderFlags ^ ((((orderFlags >> 1) & orderFlags) & 0x15) * 3);
+        }
+        // Only the sequence regions, below, use these.
+        float seq_above_wt = 0, seq_below_wt = 0, seq_valign_wt = 0;
+        if (orderFlags)
+        {
+            seq_above_wt = cslot->seqAboveWt();
+            seq_below_wt = cslot->seqBelowWt();
+            seq_valign_wt = cslot->seqValignWt();
         }
 
 #if !defined GRAPHITE2_NTRACING
@@ -355,19 +360,6 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
         // Process main bounding octabox.
         for (int i = 0; i < 4; ++i)
         {
-            // For this axis: the target's extent across it (otmin, otmax),
-            // the margin measured along it, and the two ranges a box is
-            // tested against, each widened by that margin: the target's
-            // extent across the axis (otlo, othi) and the range of
-            // movement along it (clo, chi).
-            const float otmin = _otmin[i];
-            const float otmax = _otmax[i];
-            const float lmargin = _lmargin[i];
-            const float otlo = _otlo[i];
-            const float othi = _othi[i];
-            const float clo = _clo[i];
-            const float chi = _chi[i];
-
 #if !defined GRAPHITE2_NTRACING
             if (dbgout)
                 dbgout->setenv(1, reinterpret_cast<void *>(-1));
@@ -465,15 +457,15 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
             }
 
             // The slot matters on this axis only if it comes within the
-            // margin of the target across the axis (omin, omax) and the
-            // shifts along the axis at which the two would overlap (vmin,
-            // vmax) come within the margin of where the target may go. The
-            // first is the cheaper to find out.
+            // margin of the target across the axis (omin, omax against
+            // _otlo, _othi) and the shifts along the axis at which the two
+            // would overlap (vmin, vmax) come within the margin of where the
+            // target may go (_clo, _chi). The first is the cheaper to find out.
             switch (i) {
                 case 0 :	// x direction
                     omin = bb.yi + sy;
                     omax = bb.ya + sy;
-                    if (omax < otlo || omin > othi)
+                    if (omax < _otlo[0] || omin > _othi[0])
                         continue;
                     vmin = max(max(bb.xi - tbb.xa + sx, sb.di - tsb.da + ty + sd), sb.si - tsb.sa - ty + ss);
                     vmax = min(min(bb.xa - tbb.xi + sx, sb.da - tsb.di + ty + sd), sb.sa - tsb.si - ty + ss);
@@ -481,7 +473,7 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
                 case 1 :	// y direction
                     omin = bb.xi + sx;
                     omax = bb.xa + sx;
-                    if (omax < otlo || omin > othi)
+                    if (omax < _otlo[1] || omin > _othi[1])
                         continue;
                     vmin = max(max(bb.yi - tbb.ya + sy, tsb.di - sb.da + tx - sd), sb.si - tsb.sa - tx + ss);
                     vmax = min(min(bb.ya - tbb.yi + sy, tsb.da - sb.di + tx - sd), sb.sa - tsb.si - tx + ss);
@@ -490,7 +482,7 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
                             // negatively-sloped boundaries.
                     omin = sb.di + sd;
                     omax = sb.da + sd;
-                    if (omax < otlo || omin > othi)
+                    if (omax < _otlo[2] || omin > _othi[2])
                         continue;
                     vmin = max(max(sb.si - tsb.sa + ss, 2 * (bb.yi - tbb.ya + sy) + td), 2 * (bb.xi - tbb.xa + sx) - td);
                     vmax = min(min(sb.sa - tsb.si + ss, 2 * (bb.ya - tbb.yi + sy) + td), 2 * (bb.xa - tbb.xi + sx) - td);
@@ -499,20 +491,30 @@ bool ShiftCollider::mergeSlot(Segment *seg, Slot *slot, const SlotCollision *csl
                             // positively-sloped boundaries.
                     omin = sb.si + ss;
                     omax = sb.sa + ss;
-                    if (omax < otlo || omin > othi)
+                    if (omax < _otlo[3] || omin > _othi[3])
                         continue;
                     vmin = max(max(sb.di - tsb.da + sd, 2 * (bb.xi - tbb.xa + sx) - ts), -2 * (bb.ya - tbb.yi + sy) + ts);
                     vmax = min(min(sb.da - tsb.di + sd, 2 * (bb.xa - tbb.xi + sx) - ts), -2 * (bb.yi - tbb.ya + sy) + ts);
                     break;
             }
-            if (vmax < clo || vmin > chi)
+            if (vmax < _clo[i] || vmin > _chi[i])
                 continue;
+
+            // The target's extent across the axis and the margin measured along it.
+            const float otmin = _otmin[i];
+            const float otmax = _otmax[i];
+            const float lmargin = _lmargin[i];
 
             // Process sub-boxes that are defined for this glyph.
             // We only need to do this if there was in fact a collision with the main octabox.
             uint8 numsub = gc.numSubBounds(gid);
             if (numsub > 0)
             {
+                // The same bounds as for the main box
+                const float otlo = _otlo[i];
+                const float othi = _othi[i];
+                const float clo = _clo[i];
+                const float chi = _chi[i];
                 bool anyhits = false;
                 for (int j = 0; j < numsub; ++j)
                 {
