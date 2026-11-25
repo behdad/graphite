@@ -324,6 +324,11 @@ namespace
 // how many were converted: n rounded down to a multiple of four when all of
 // those are below limit, otherwise 0, in which case nothing has been checked
 // and the caller's own loop must read, test and report from the start.
+// Kept out of line: GCC vectorises the loop here, but no longer does once
+// it has been inlined two levels up, as happens in an LTO build.
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
 size_t read_uint16s_below(uint16 * dst, const byte * src, size_t n, const uint16 limit)
 {
     typedef unsigned long long word;
