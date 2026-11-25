@@ -795,27 +795,44 @@ bool Pass::runFSM(FiniteStateMachine& fsm, Slot * slot) const
     if (fsm.slots.context() < m_minPreCtxt)
         return false;
 
-    uint16 state = m_startStates[m_maxPreCtxt - fsm.slots.context()];
-    uint8  free_slots = SlotMap::MAX_SLOTS;
+    // Nothing here changes the tables: read what the loop needs once.
+    const uint16 * const cols        = m_cols,
+                 * const transitions = m_transitions;
+    const State  * const states      = m_states;
+    const unsigned int numGlyphs     = m_numGlyphs,
+                       numTransition = m_numTransition,
+                       numColumns    = m_numColumns,
+                       successStart  = m_successStart;
+    unsigned int state = m_startStates[m_maxPreCtxt - fsm.slots.context()];
+    // The slots go into the map from its start; there is room for MAX_SLOTS.
+    Slot * * const map = fsm.slots.begin(),
+         * * const end = map + SlotMap::MAX_SLOTS,
+         * * free = map;
+    bool res = true;
     do
     {
-        fsm.slots.pushSlot(slot);
-        if (slot->gid() >= m_numGlyphs
-         || m_cols[slot->gid()] == 0xffffU
-         || --free_slots == 0
-         || state >= m_numTransition)
-            return free_slots != 0;
+        *free++ = slot;
+        const unsigned int gid = slot->gid();
+        if (gid >= numGlyphs) break;
+        const unsigned int col = cols[gid];
+        if (col == 0xffffU) break;
+        if (free == end) { res = false; break; }
+        if (state >= numTransition) break;
 
-        const uint16 * transitions = m_transitions + state*m_numColumns;
-        state = transitions[m_cols[slot->gid()]];
-        if (state >= m_successStart)
-            fsm.rules.accumulate_rules(m_states[state]);
+        state = transitions[state*numColumns + col];
+        if (state >= successStart)
+            fsm.rules.accumulate_rules(states[state]);
 
         slot = slot->next();
-    } while (state != 0 && slot);
+        if (state == 0 || !slot)
+        {
+            *free++ = slot;
+            break;
+        }
+    } while (true);
 
-    fsm.slots.pushSlot(slot);
-    return true;
+    fsm.slots.size(free - map);
+    return res;
 }
 
 #if !defined GRAPHITE2_NTRACING

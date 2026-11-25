@@ -84,6 +84,7 @@ public:
   Slot       * * begin();
   Slot       * * end();
   size_t         size() const;
+  void           size(size_t n);
   unsigned short context() const;
   void           reset(Slot &, unsigned short);
 
@@ -236,6 +237,12 @@ inline
 size_t SlotMap::size() const
 {
   return m_size;
+}
+
+inline
+void SlotMap::size(size_t n)
+{
+  m_size = (unsigned short)(n);
 }
 
 inline
