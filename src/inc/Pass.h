@@ -48,6 +48,8 @@ private:
                      Face &, enum passtype pt, Error &e);
     bool    readStates(const byte * starts, const byte * states, const byte * o_rule_map, Face &, Error &e);
     bool    readRanges(const byte * ranges, size_t num_ranges, Error &e);
+    bool    buildFilter(const byte * ranges, size_t num_ranges, Face &, Error &e);
+    bool    couldMatch(const Slot * slot) const;
     uint16  glyphToCol(const uint16 gid) const;
     bool    runFSM(FiniteStateMachine & fsm, Slot * slot) const;
     void    dumpRuleEventConsidered(const FiniteStateMachine & fsm, const RuleEntry & re) const;
@@ -70,6 +72,8 @@ private:
     State             * m_states;
     vm::Machine::Code * m_codes;
     byte              * m_progs;
+    byte              * m_filter;       // per glyph: 0 if no rule can match with it at the cursor
+    uint32            * m_filterPairs;  // per column: the columns that can come next in a match
 
     byte   m_numCollRuns;
     byte   m_kernColls;
@@ -81,6 +85,7 @@ private:
     uint16 m_numSuccess;
     uint16 m_successStart;
     uint16 m_numColumns;
+    uint16 m_filterWords;
     byte m_minPreCtxt;
     byte m_maxPreCtxt;
     byte m_colThreshold;

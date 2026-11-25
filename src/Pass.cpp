@@ -37,6 +37,8 @@ Pass::Pass()
   m_states(0),
   m_codes(0),
   m_progs(0),
+  m_filter(0),
+  m_filterPairs(0),
   m_numCollRuns(0),
   m_kernColls(0),
   m_iMaxLoop(0),
@@ -47,6 +49,7 @@ Pass::Pass()
   m_numSuccess(0),
   m_successStart(0),
   m_numColumns(0),
+  m_filterWords(0),
   m_minPreCtxt(0),
   m_maxPreCtxt(0),
   m_colThreshold(0),
@@ -65,6 +68,8 @@ Pass::~Pass()
     if (m_rules) delete [] m_rules;
     if (m_codes) delete [] m_codes;
     free(m_progs);
+    free(m_filter);
+    free(m_filterPairs);
 }
 
 bool Pass::readPass(const byte * const pass_start, size_t pass_length, size_t subtable_base,
@@ -184,7 +189,8 @@ bool Pass::readPass(const byte * const pass_start, size_t pass_length, size_t su
 #ifdef GRAPHITE2_TELEMETRY
     telemetry::category _states_cat(face.tele.states);
 #endif
-    return m_numRules ? readStates(start_states, states, o_rule_map, face, e) : true;
+    if (!m_numRules) return true;
+    return readStates(start_states, states, o_rule_map, face, e) && buildFilter(ranges, numRanges, face, e);
 }
 
 
@@ -371,6 +377,357 @@ bool Pass::readRanges(const byte * ranges, size_t num_ranges, Error &e)
     return true;
 }
 
+namespace
+{
+
+// Sets of numbers below some n as arrays of bits, for Pass::buildFilter.
+inline bool testBit(const uint32 * set, size_t i)   { return (set[i >> 5] >> (i & 31)) & 1; }
+inline void setBit(uint32 * set, size_t i)          { set[i >> 5] |= uint32(1) << (i & 31); }
+
+// The first member of the set that is not below i, or n if there is none.
+inline size_t nextBit(const uint32 * set, size_t i, const size_t n)
+{
+    while (i < n)
+    {
+        const uint32 bits = set[i >> 5] >> (i & 31);
+        if (bits & 1) return i;
+        i = bits ? i + 1 : (i | 31) + 1;
+    }
+    return n;
+}
+
+// Entries of a transition table that are looked at in one go.
+typedef unsigned long long chunk_t;
+enum { CHUNK = sizeof(chunk_t) / sizeof(uint16) };
+
+// Calls visit(column, state) for each entry of a row of a transition table
+// that is not what the row ref has in the same column, or for each entry
+// if there is no ref. The rows of the states a run can be in at one slot are
+// mostly alike, so that going through what each has that the one before it
+// has not takes far less than going through all of each.
+template <typename V>
+inline void scanRow(const uint16 * const row, const uint16 * const ref, const size_t n, V & visit)
+{
+    const uint16 * p = row, * const end = row + n;
+    if (!ref)
+    {
+        for (; p != end; ++p) visit(p - row, *p);
+        return;
+    }
+    const ptrdiff_t d = ref - row;
+    for (; end - p >= CHUNK; p += CHUNK)
+    {
+        chunk_t a, b;
+        memcpy(&a, p, sizeof a);
+        memcpy(&b, p + d, sizeof b);
+        if (a == b) continue;
+        for (int i = 0; i != CHUNK; ++i)
+            if (p[i] != p[d + i]) visit(p - row + i, p[i]);
+    }
+    for (; p != end; ++p)
+        if (*p != p[d]) visit(p - row, *p);
+}
+
+// Collects the different states that entries of a transition table lead
+// to, less state 0, which ends a run.
+class Targets
+{
+public:
+    // seen: a zeroed byte per state; list: room for every state.
+    Targets(byte * seen, uint16 * list) : m_seen(seen), m_list(list), m_size(0) { if (seen) seen[0] = 1; }
+
+    void operator () (size_t, const uint16 state)
+    {
+        if (m_seen[state]) return;
+        m_seen[state] = 1;
+        m_list[m_size++] = state;
+    }
+    // Hands them out, last first.
+    bool   empty() const    { return m_size == 0; }
+    uint16 pop()            { const uint16 state = m_list[--m_size]; m_seen[state] = 0; return state; }
+
+private:
+    byte   * m_seen;
+    uint16 * m_list;
+    size_t   m_size;
+};
+
+// What a column can do at the cursor.
+enum { CAN_GO_ON = 1,   // lead to a state that has transitions
+       CAN_MATCH = 2 }; // lead to a state that has rules
+
+// Notes what each column can do at the cursor, and each transition state a
+// column leads to there.
+class Columns
+{
+public:
+    struct Step { uint16 col, state; };
+
+    // can and last: a zeroed entry per column; steps: room for as many as are added before clear().
+    Columns(byte * can, uint16 * last, Step * steps, const State * states, size_t successStart, size_t numTrans)
+    : m_can(can), m_last(last), m_steps(steps), m_states(states),
+      m_successStart(successStart), m_numTrans(numTrans), m_size(0) {}
+
+    void operator () (const size_t col, const uint16 state)
+    {
+        if (state >= m_successStart && !m_states[state].empty())
+            m_can[col] |= CAN_MATCH;
+        if (state == 0 || state >= m_numTrans || state == m_last[col]) return;
+        m_can[col] |= CAN_GO_ON;
+        m_last[col] = state;
+        m_steps[m_size].col = uint16(col);
+        m_steps[m_size++].state = state;
+    }
+    size_t size() const                         { return m_size; }
+    const Step & operator [] (size_t i) const   { return m_steps[i]; }
+    void clear()                                { m_size = 0; }
+
+private:
+    byte        * m_can;
+    uint16      * m_last;
+    Step        * m_steps;
+    const State * m_states;
+    const size_t  m_successStart,
+                  m_numTrans;
+    size_t        m_size;
+};
+
+} // end of namespace
+
+// Sets up the test couldMatch() makes before the state machine is run at a
+// slot: whether, with the glyph at the slot and the one that follows it, the
+// run can end with any rule to test at all.
+//
+// runFSM() starts up to m_maxPreCtxt slots before the cursor and makes one
+// transition per slot, and a rule is only there to be tested once a success
+// state holding rules has been entered. Whatever glyphs come before the
+// cursor, the state the machine is in when it gets to the cursor is one of a
+// set that can be read off the table: the start states, followed through all
+// their transitions for as many slots as come before the cursor. If none of
+// that set gets anywhere with the glyph at the cursor and then with the one
+// after it, the run cannot yield a rule.
+//
+// Anything not provably so is left to runFSM(): the filter only ever says
+// that a run would be fruitless, and a pass it cannot be worked out for (a
+// table in which rules turn up before the cursor is reached, or where the
+// sets take too long to follow) gets none.
+//
+// ranges is what readRanges() has checked and read m_cols from.
+bool Pass::buildFilter(const byte * ranges, size_t num_ranges, Face & face, Error &e)
+{
+    const size_t numTrans = m_numTransition,
+                 numCols  = m_numColumns,
+                 setWords = (numTrans + 31) >> 5,
+    // A row of m_filterPairs is a set of what may come next: bit 0 stands for
+    // nothing more being needed, bit c+1 for a glyph of column c.
+                 rowWords = (numCols + 32) >> 5,
+                 maxSteps = numCols + m_numStates;
+    // The rows are no use for a table with next to no states, and must not
+    // take more room than the table they are made from.
+    const bool   pairs    = 2 * rowWords <= numTrans;
+    const uint16 * const transitions = m_transitions;
+    const State  * const states = m_states;
+    const uint16 successStart = m_successStart;
+
+    // A transition to state 0 ends a run. Should state 0 hold rules, the
+    // run does not end empty handed and no transition can be written off.
+    if (numTrans == 0 || (successStart == 0 && !states[0].empty()))
+        return true;
+
+    // sets:   two sets of transition states, one before a slot and one after;
+    // seen, list: for the different states the rows of one of the sets lead to;
+    // can, last, steps: for what the columns lead to at the cursor;
+    // next:   for each transition state entered at the cursor, in the order
+    //         they turn up, its row as the set of columns it goes on with;
+    // nextOf: which of those sets is a state's.
+    uint32 * const sets   = grzeroalloc<uint32>(2 * setWords);
+    byte   * const seen   = grzeroalloc<byte>(m_numStates);
+    uint16 * const list   = gralloc<uint16>(m_numStates);
+    byte   * const can    = grzeroalloc<byte>(numCols);
+    uint16 * const last   = grzeroalloc<uint16>(numCols);
+    Columns::Step * const steps = gralloc<Columns::Step>(maxSteps);
+    uint32 * const next   = pairs ? gralloc<uint32>(numTrans * rowWords) : 0;
+    uint16 * const nextOf = gralloc<uint16>(numTrans);
+    byte   * const filter = grzeroalloc<byte>(m_numGlyphs);
+    uint32 * const filterPairs = pairs ? grzeroalloc<uint32>(numCols * rowWords) : 0;
+
+    // Rows of the transition table we are prepared to look at; an operation
+    // on a row of filterPairs counts for as much of one as it is long.
+    size_t budget  = 4 * numTrans + 16,
+           merged  = 0,
+           numNext = 0;
+    bool   usable  = sets && seen && list && can && last && steps && nextOf && filter
+                        && (!pairs || (next && filterPairs));
+    const bool nomem = !usable;
+
+    uint32 * cur = sets, * nxt = sets + setWords;
+
+    // The states the machine can be in at each slot before the cursor.
+    Targets targets(seen, list);
+    for (int k = m_maxPreCtxt; usable; --k)
+    {
+        // A run that has k slots before the cursor starts here.
+        if (k >= m_minPreCtxt && m_startStates[m_maxPreCtxt - k] < numTrans)
+            setBit(cur, m_startStates[m_maxPreCtxt - k]);
+        if (k == 0) break;
+
+        const uint16 * ref = 0;
+        for (size_t s = nextBit(cur, 0, numTrans); s != numTrans; s = nextBit(cur, s + 1, numTrans))
+        {
+            if (budget-- == 0) { usable = false; break; }
+            const uint16 * const row = transitions + s * numCols;
+            scanRow(row, ref, numCols, targets);
+            ref = row;
+        }
+        memset(nxt, 0, setWords * sizeof(uint32));
+        while (!targets.empty())
+        {
+            const uint16 t = targets.pop();
+            // A rule before the cursor is reached: it does not depend on the
+            // glyph at the cursor, which is all we will look at.
+            if (t >= successStart && !states[t].empty())
+                usable = false;
+            else if (t < numTrans)
+                setBit(nxt, t);
+        }
+        uint32 * const tmp = cur; cur = nxt; nxt = tmp;
+    }
+
+    // What each column leads to at the cursor and, for the columns that
+    // need more than themselves, what can follow. nxt now records the
+    // states whose rows are in next.
+    Columns columns(can, last, steps, states, successStart, numTrans);
+    const uint16 * ref = 0;
+    size_t s = usable ? nextBit(cur, 0, numTrans) : numTrans;
+    if (usable) memset(nxt, 0, setWords * sizeof(uint32));
+    while (usable && (s != numTrans || columns.size()))
+    {
+        for (; s != numTrans && columns.size() + numCols <= maxSteps; s = nextBit(cur, s + 1, numTrans))
+        {
+            if (budget-- == 0) { usable = false; break; }
+            const uint16 * const row = transitions + s * numCols;
+            scanRow(row, ref, numCols, columns);
+            ref = row;
+        }
+        for (size_t i = 0; pairs && i != columns.size() && usable; ++i)
+        {
+            const size_t c = columns[i].col,
+                         t = columns[i].state;
+            if (can[c] & CAN_MATCH) continue;
+            if (!testBit(nxt, t))
+            {
+                if (budget-- == 0) { usable = false; break; }
+                setBit(nxt, t);
+                nextOf[t] = uint16(numNext);
+                uint32 * const set = next + numNext++ * rowWords;
+                memset(set, 0, rowWords * sizeof(uint32));
+                const uint16 * const row = transitions + t * numCols;
+                size_t d = 0;
+                for (; d + CHUNK <= numCols; d += CHUNK)
+                {
+                    chunk_t some;
+                    memcpy(&some, row + d, sizeof some);
+                    if (!some) continue;
+                    uint32 bits = 0;
+                    for (size_t j = 0; j != CHUNK; ++j)
+                        bits |= uint32(row[d + j] != 0) << j;
+                    const size_t at = d + 1;
+                    set[at >> 5] |= bits << (at & 31);
+                    if ((at & 31) > 32 - CHUNK)
+                        set[(at >> 5) + 1] |= bits >> (32 - (at & 31));
+                }
+                for (; d != numCols; ++d)
+                    if (row[d] != 0) setBit(set, d + 1);
+            }
+            uint32 * const pair = filterPairs + c * rowWords;
+            const uint32 * const set = next + nextOf[t] * rowWords;
+            for (size_t j = 0; j != rowWords; ++j)
+                pair[j] |= set[j];
+            merged += rowWords;
+            if (merged >= numCols)
+            {
+                merged -= numCols;
+                if (budget-- == 0) usable = false;
+            }
+        }
+        columns.clear();
+    }
+
+    bool worthwhile = false, pairsWorthwhile = false;
+    for (size_t c = 0; pairs && c != numCols && usable; ++c)
+    {
+        uint32 * const pair = filterPairs + c * rowWords;
+        if (can[c] & CAN_MATCH)
+            memset(pair, 0xFF, rowWords * sizeof(uint32));
+        else if (can[c])
+        {
+            can[c] = 0;
+            for (size_t j = 0; j != rowWords && !can[c]; ++j)
+                can[c] = pair[j] != 0;
+            pairsWorthwhile |= can[c];
+        }
+    }
+
+    if (usable)
+    {
+        size_t n = 0;
+        for (; num_ranges; --num_ranges)
+        {
+            const size_t first = be::read<uint16>(ranges),
+                         end   = be::read<uint16>(ranges) + 1,
+                         col   = be::read<uint16>(ranges);
+            if (!can[col]) continue;
+            memset(filter + first, 1, end - first);
+            n += end - first;
+        }
+        worthwhile = n != m_numGlyphs;
+    }
+
+    free(sets);
+    free(seen);
+    free(list);
+    free(can);
+    free(last);
+    free(steps);
+    free(next);
+    free(nextOf);
+    if (usable && pairsWorthwhile)
+    {
+        m_filterPairs = filterPairs;
+        m_filterWords = uint16(rowWords);
+    }
+    else
+        free(filterPairs);
+    if (usable && (worthwhile || pairsWorthwhile))
+        m_filter = filter;
+    else
+        free(filter);
+    if (e.test(nomem, E_OUTOFMEM)) return face.error(e);
+    return true;
+}
+
+// False only when runFSM() at this slot is certain to end with no rule to test.
+inline
+bool Pass::couldMatch(const Slot * slot) const
+{
+    const byte * const filter = m_filter;
+    if (!filter) return true;
+
+    const unsigned int gid = slot->gid();
+    if (gid >= m_numGlyphs || !filter[gid]) return false;
+
+    const uint32 * pairs = m_filterPairs;
+    if (!pairs) return true;
+
+    // Column of the glyph that follows, plus one; 0 if there is none.
+    const Slot * const next = slot->next();
+    unsigned int follows = 0;
+    if (next && next->gid() < m_numGlyphs)
+        follows = uint16(m_cols[next->gid()] + 1);
+    pairs += m_cols[gid] * m_filterWords;
+    return (pairs[follows >> 5] >> (follows & 31)) & 1;
+}
+
 
 bool Pass::runGraphite(vm::Machine & m, FiniteStateMachine & fsm, bool reverse) const
 {
@@ -394,7 +751,11 @@ bool Pass::runGraphite(vm::Machine & m, FiniteStateMachine & fsm, bool reverse) 
         int lc = m_iMaxLoop;
         do
         {
-            findNDoRule(s, m, fsm);
+            // Without a rule to test, all findNDoRule does is to move on.
+            if (couldMatch(s))
+                findNDoRule(s, m, fsm);
+            else
+                s = s->next();
             if (m.status() != Machine::finished) return false;
             if (s && (s == m.slotMap().highwater() || m.slotMap().highpassed() || --lc == 0)) {
                 if (!lc)
